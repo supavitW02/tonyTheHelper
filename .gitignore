@@ -1,0 +1,21 @@
+# Agent skills — vendored, restore with: npx skills experimental_install
+.claude/skills/
+.claude/settings.local.json
+
+# Web
+node_modules/
+web/dist/
+
+# Go
+api/bin/
+*.test
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
