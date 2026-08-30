@@ -1,0 +1,29 @@
+@import 'tailwindcss';
+
+@theme {
+  /* IBM Plex Sans Thai carries Thai and Latin in one family, so mixed strings do not
+     switch typeface mid-sentence. */
+  --font-sans: 'IBM Plex Sans Thai', 'Noto Sans Thai', ui-sans-serif, system-ui, sans-serif;
+}
+
+/*
+  20px base type, the readability floor for issue #1.
+
+  Expressed as a percentage of the browser's own default rather than a fixed 20px, so
+  someone who has already enlarged their phone's font size keeps that enlargement
+  instead of having it overridden. 16px default x 125% = 20px. Every rem-based size in
+  the app — type, spacing, tap targets — scales from here.
+
+  These numbers are provisional until issue #12 validates them on a real phone.
+*/
+html {
+  font-size: 125%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background-color: var(--color-white);
+  color: var(--color-slate-900);
+  -webkit-font-smoothing: antialiased;
+}
