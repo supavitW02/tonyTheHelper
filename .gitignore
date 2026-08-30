@@ -4,11 +4,15 @@
 
 # Web
 node_modules/
-web/dist/
 
 # Go
 api/bin/
 *.test
+
+# The built web app, embedded into the Go binary at build time (ADR-0003).
+# The directory itself must exist for go:embed to compile, hence the .gitkeep.
+api/static/*
+!api/static/.gitkeep
 
 # Secrets and local env
 .env

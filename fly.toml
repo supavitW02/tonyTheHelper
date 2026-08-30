@@ -1,0 +1,26 @@
+# Fly.io deployment. Region sin (Singapore) is the closest Fly region to Thailand.
+app = 'tonythehelper'
+primary_region = 'sin'
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_start_machines = true
+  # Suspend rather than stop: waking a suspended machine is fast enough that the app
+  # does not feel broken to someone opening it from LINE.
+  auto_stop_machines = 'suspend'
+  min_machines_running = 0
+  processes = ['app']
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/healthz'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '256mb'

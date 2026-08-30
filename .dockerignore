@@ -1,0 +1,10 @@
+.git
+.github
+.claude
+docs
+*.md
+**/node_modules
+
+# Rebuilt inside the image; never copy a local build in.
+api/static/*
+!api/static/.gitkeep

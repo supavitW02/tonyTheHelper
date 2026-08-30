@@ -40,13 +40,42 @@ so the whole product is one image, one deployment, one domain, and no CORS. See
 
 ```
 api/                 Go API; embeds and serves the built web app
+  internal/server/   HTTP surface: health check and the web app
+  static/            the built web app, written here by `vite build` (gitignored)
 web/                 Vite + React LIFF app (Thai UI)
 docs/adr/            architecture decision records
 docs/agents/         how coding agents work in this repo
 CONTEXT.md           domain glossary, English and Thai
+Dockerfile           builds web, then the Go binary, into one image
+fly.toml             Fly.io deployment, region sin
 ```
 
-`api/` and `web/` do not exist yet — issue #1 creates them.
+## Running it locally
+
+```bash
+cd web && npm install && npm run build   # writes ../api/static
+cd ../api && go run .                    # http://localhost:8080
+```
+
+For frontend work, run the Go API and Vite side by side — Vite proxies `/healthz` and
+`/api` through to the Go server, so the frontend uses the same relative paths it will use
+in production:
+
+```bash
+cd api && go run .        # terminal 1
+cd web && npm run dev     # terminal 2
+```
+
+Tests and checks:
+
+```bash
+cd api && go test ./... -race
+cd web && npm run lint && npm run build   # build runs tsc -b, so this typechecks too
+docker build -t tonythehelper .           # what CI and Fly.io build
+```
+
+Deployment is automatic: pushing to `main` runs `flyctl deploy`. It needs a `FLY_API_TOKEN`
+repository secret, created with `fly tokens create deploy --app <app-name>`.
 
 ## Start here
 
