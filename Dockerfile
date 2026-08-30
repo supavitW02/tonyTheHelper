@@ -9,7 +9,7 @@ COPY web/ ./
 RUN npm run build
 
 # 2. Build the Go binary with the web app inside it (ADR-0003).
-FROM golang:1.24-alpine AS api
+FROM golang:1.25-alpine AS api
 WORKDIR /src/api
 COPY api/ ./
 COPY --from=web /src/api/static ./static

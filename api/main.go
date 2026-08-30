@@ -5,44 +5,97 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"errors"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"github.com/supavitW02/tonyTheHelper/api/internal/config"
+	"github.com/supavitW02/tonyTheHelper/api/internal/line"
 	"github.com/supavitW02/tonyTheHelper/api/internal/server"
+	"github.com/supavitW02/tonyTheHelper/api/internal/session"
+	"github.com/supavitW02/tonyTheHelper/api/internal/store"
 )
 
 //go:embed all:static
 var embedded embed.FS
 
 func main() {
-	assets, err := fs.Sub(embedded, "static")
-	if err != nil {
-		log.Fatalf("embedded web app: %v", err)
-	}
-
-	addr := ":" + port()
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           server.New(assets),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	log.Printf("listening on %s", addr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := run(); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// port follows the PORT environment variable so the same binary runs locally and
-// on Fly.io without a flag.
-func port() string {
-	if p := os.Getenv("PORT"); p != "" {
-		return p
+func run() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
 	}
-	return "8080"
+
+	assets, err := fs.Sub(embedded, "static")
+	if err != nil {
+		return err
+	}
+
+	// A generous startup budget: Fly machines wake from suspend, and a cold Postgres
+	// connection on the far side of a region is not instant.
+	startupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	db, err := store.Open(startupCtx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Migrations run at startup. With a single machine there is no window in which two
+	// versions of the schema are live at once; revisit this if the app is ever scaled out.
+	if err := db.Migrate(startupCtx); err != nil {
+		return err
+	}
+	log.Print("database ready")
+
+	srv := &http.Server{
+		Addr: ":" + cfg.Port,
+		Handler: server.New(server.Deps{
+			Assets:   assets,
+			LiffID:   cfg.LiffID,
+			Verifier: line.NewVerifier(cfg.LineChannelID),
+			Users:    db,
+			Sessions: session.NewManager(cfg.SessionSecret),
+		}),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	return serve(srv)
+}
+
+// serve runs the server until interrupted, then lets in-flight requests finish.
+func serve(srv *http.Server) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errs := make(chan error, 1)
+	go func() {
+		log.Printf("listening on %s", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errs <- err
+		}
+	}()
+
+	select {
+	case err := <-errs:
+		return err
+	case <-ctx.Done():
+		log.Print("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx)
+	}
 }

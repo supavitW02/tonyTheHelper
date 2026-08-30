@@ -40,7 +40,11 @@ so the whole product is one image, one deployment, one domain, and no CORS. See
 
 ```
 api/                 Go API; embeds and serves the built web app
-  internal/server/   HTTP surface: health check and the web app
+  internal/config/   environment settings, validated at startup
+  internal/line/     LINE ID token verification
+  internal/session/  signed session cookies
+  internal/server/   HTTP surface: health, sign-in, and the web app
+  internal/store/    database access and embedded migrations
   static/            the built web app, written here by `vite build` (gitignored)
 web/                 Vite + React LIFF app (Thai UI)
 docs/adr/            architecture decision records
@@ -50,12 +54,46 @@ Dockerfile           builds web, then the Go binary, into one image
 fly.toml             Fly.io deployment, region sin
 ```
 
+## Configuration
+
+The API reads its settings from the environment and refuses to start if any are
+missing. Copy [.env.example](.env.example) and fill it in; in production these are set
+with `fly secrets set`, never in `fly.toml`.
+
+| Variable | What it is |
+| --- | --- |
+| `DATABASE_URL` | Supabase Postgres connection string |
+| `LINE_CHANNEL_ID` | LINE Login channel id; ID tokens must be issued for it |
+| `LINE_LIFF_ID` | The LIFF app id. Public — served to the frontend at runtime, so changing it needs no rebuild |
+| `SESSION_SECRET` | Signs session cookies. At least 32 bytes |
+| `PORT` | Optional, defaults to 8080 |
+
 ## Running it locally
 
 ```bash
+cp .env.example .env                     # then fill it in
 cd web && npm install && npm run build   # writes ../api/static
 cd ../api && go run .                    # http://localhost:8080
 ```
+
+A local Postgres is enough for everything except signing in:
+
+```bash
+docker run -d --name tth-pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=tth \
+  -p 55432:5432 postgres:17-alpine
+```
+
+### Signing in during development
+
+LIFF only runs from an HTTPS endpoint that LINE knows about, so `localhost` alone will
+not do. Register a **second, development LIFF app** pointing at a tunnel, and never
+point the production LIFF app at your laptop:
+
+```bash
+cloudflared tunnel --url http://localhost:8080   # or: ngrok http 8080
+```
+
+Put the tunnel URL in the development LIFF app's endpoint, and its id in `LINE_LIFF_ID`.
 
 For frontend work, run the Go API and Vite side by side — Vite proxies `/healthz` and
 `/api` through to the Go server, so the frontend uses the same relative paths it will use
@@ -69,9 +107,17 @@ cd web && npm run dev     # terminal 2
 Tests and checks:
 
 ```bash
-cd api && go test ./... -race
+cd api && go test ./... -race             # store tests skip without TEST_DATABASE_URL
 cd web && npm run lint && npm run build   # build runs tsc -b, so this typechecks too
 docker build -t tonythehelper .           # what CI and Fly.io build
+```
+
+The store tests run against a real database rather than a fake, because an upsert, a
+unique constraint and a uuid cast are exactly what a fake would get wrong:
+
+```bash
+TEST_DATABASE_URL='postgres://postgres:test@localhost:55432/tth?sslmode=disable' \
+  go test ./internal/store/ -v
 ```
 
 Deployment is automatic: pushing to `main` runs `flyctl deploy`. It needs a `FLY_API_TOKEN`
