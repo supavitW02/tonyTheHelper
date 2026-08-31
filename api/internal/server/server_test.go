@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/supavitW02/tonyTheHelper/api/internal/line"
 	"github.com/supavitW02/tonyTheHelper/api/internal/server"
@@ -72,15 +73,33 @@ func (f *fakeUsers) UserByID(_ context.Context, id string) (store.User, error) {
 	return u, nil
 }
 
-// fakeHouseholds is an in-memory stand-in for the household tables.
+// fakeHouseholds is an in-memory stand-in for the household, membership and invite
+// tables. It models ownership and invite consumption, because "only the owner manages
+// people" and "an invite grants one person membership" are the behaviours under test.
 type fakeHouseholds struct {
-	byUser map[string][]store.Household
-	err    error
-	nextID int
+	byUser  map[string][]store.Household
+	names   map[string]string
+	owners  map[string]string
+	invites map[string]*fakeInvite
+	last    map[string]string
+	err     error
+	nextID  int
+}
+
+type fakeInvite struct {
+	householdID string
+	expiresAt   time.Time
+	consumedBy  string
 }
 
 func newFakeHouseholds() *fakeHouseholds {
-	return &fakeHouseholds{byUser: map[string][]store.Household{}}
+	return &fakeHouseholds{
+		byUser:  map[string][]store.Household{},
+		names:   map[string]string{},
+		owners:  map[string]string{},
+		invites: map[string]*fakeInvite{},
+		last:    map[string]string{},
+	}
 }
 
 func (f *fakeHouseholds) CreateHousehold(_ context.Context, ownerID, name string) (store.Household, error) {
@@ -90,6 +109,9 @@ func (f *fakeHouseholds) CreateHousehold(_ context.Context, ownerID, name string
 	f.nextID++
 	h := store.Household{ID: fmt.Sprintf("household-%d", f.nextID), Name: name, OwnerID: ownerID, IsOwner: true}
 	f.byUser[ownerID] = append(f.byUser[ownerID], h)
+	f.names[h.ID] = name
+	f.owners[h.ID] = ownerID
+	f.last[ownerID] = h.ID
 	return h, nil
 }
 
@@ -98,6 +120,130 @@ func (f *fakeHouseholds) HouseholdsForUser(_ context.Context, userID string) ([]
 		return nil, f.err
 	}
 	return f.byUser[userID], nil
+}
+
+func (f *fakeHouseholds) isMember(householdID, userID string) bool {
+	for _, h := range f.byUser[userID] {
+		if h.ID == householdID {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeHouseholds) requireOwner(householdID, userID string) error {
+	if !f.isMember(householdID, userID) {
+		return store.ErrNotFound
+	}
+	if f.owners[householdID] != userID {
+		return store.ErrNotOwner
+	}
+	return nil
+}
+
+func (f *fakeHouseholds) CreateInvite(_ context.Context, householdID, ownerID string, now time.Time) (store.Invite, error) {
+	if f.err != nil {
+		return store.Invite{}, f.err
+	}
+	if err := f.requireOwner(householdID, ownerID); err != nil {
+		return store.Invite{}, err
+	}
+	token := fmt.Sprintf("token-%d", len(f.invites)+1)
+	f.invites[token] = &fakeInvite{householdID: householdID, expiresAt: now.Add(store.InviteTTL)}
+	return store.Invite{Token: token, ExpiresAt: now.Add(store.InviteTTL)}, nil
+}
+
+func (f *fakeHouseholds) AcceptInvite(_ context.Context, token, userID string, now time.Time) (store.Household, error) {
+	if f.err != nil {
+		return store.Household{}, f.err
+	}
+	invite, ok := f.invites[token]
+	if !ok {
+		return store.Household{}, store.ErrNotFound
+	}
+	if !invite.expiresAt.After(now) {
+		return store.Household{}, store.ErrInviteExpired
+	}
+
+	already := f.isMember(invite.householdID, userID)
+	if !already && invite.consumedBy != "" && invite.consumedBy != userID {
+		return store.Household{}, store.ErrInviteUsed
+	}
+
+	h := store.Household{
+		ID: invite.householdID, Name: f.names[invite.householdID],
+		OwnerID: f.owners[invite.householdID],
+	}
+	h.IsOwner = h.OwnerID == userID
+	if !already {
+		f.byUser[userID] = append(f.byUser[userID], h)
+	}
+	if invite.consumedBy == "" {
+		invite.consumedBy = userID
+	}
+	f.last[userID] = invite.householdID
+	return h, nil
+}
+
+func (f *fakeHouseholds) MembersOf(_ context.Context, householdID, userID string) ([]store.Member, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if !f.isMember(householdID, userID) {
+		return nil, store.ErrNotFound
+	}
+	members := []store.Member{}
+	for candidate, households := range f.byUser {
+		for _, h := range households {
+			if h.ID == householdID {
+				members = append(members, store.Member{
+					UserID: candidate, DisplayName: "ผู้ใช้ " + candidate,
+					IsOwner: f.owners[householdID] == candidate,
+				})
+			}
+		}
+	}
+	sort.Slice(members, func(a, b int) bool {
+		if members[a].IsOwner != members[b].IsOwner {
+			return members[a].IsOwner
+		}
+		return members[a].UserID < members[b].UserID
+	})
+	return members, nil
+}
+
+func (f *fakeHouseholds) RemoveMember(_ context.Context, householdID, ownerID, targetUserID string) error {
+	if f.err != nil {
+		return f.err
+	}
+	if err := f.requireOwner(householdID, ownerID); err != nil {
+		return err
+	}
+	if targetUserID == ownerID {
+		return store.ErrCannotRemoveOwner
+	}
+	if !f.isMember(householdID, targetUserID) {
+		return store.ErrNotFound
+	}
+	kept := []store.Household{}
+	for _, h := range f.byUser[targetUserID] {
+		if h.ID != householdID {
+			kept = append(kept, h)
+		}
+	}
+	f.byUser[targetUserID] = kept
+	return nil
+}
+
+func (f *fakeHouseholds) SetLastHousehold(_ context.Context, userID, householdID string) error {
+	if f.err != nil {
+		return f.err
+	}
+	if !f.isMember(householdID, userID) {
+		return store.ErrNotFound
+	}
+	f.last[userID] = householdID
+	return nil
 }
 
 // fakeItems is an in-memory stand-in for the items and movement tables. It enforces
@@ -410,6 +556,32 @@ func (h *harness) get(path string) *http.Response {
 func (h *harness) signIn(token string) *http.Response {
 	req := httptest.NewRequest(http.MethodPost, "/api/session", strings.NewReader(`{"idToken":"`+token+`"}`))
 	req.Header.Set("Content-Type", "application/json")
+	return h.do(req)
+}
+
+// asUser returns a session cookie for another person, registering them in the fake user
+// store. The invite flow only means anything with two people in it.
+func (h *harness) asUser(t *testing.T, userID, name string) *http.Cookie {
+	t.Helper()
+	h.users.byID[userID] = store.User{ID: userID, DisplayName: name}
+	token, err := h.sessions.Issue(userID)
+	if err != nil {
+		t.Fatalf("issue session for %s: %v", userID, err)
+	}
+	return &http.Cookie{Name: session.CookieName, Value: token}
+}
+
+// doAs makes a request as whoever the cookie belongs to.
+func (h *harness) doAs(t *testing.T, cookie *http.Cookie, method, path, payload string) *http.Response {
+	t.Helper()
+	var req *http.Request
+	if payload == "" {
+		req = httptest.NewRequest(method, path, nil)
+	} else {
+		req = httptest.NewRequest(method, path, strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.AddCookie(cookie)
 	return h.do(req)
 }
 
@@ -1345,6 +1517,267 @@ func TestImageEndpointsRequireASession(t *testing.T) {
 		{http.MethodPost, "/api/items/some-id/image"},
 		{http.MethodPut, "/api/items/some-id/image"},
 		{http.MethodGet, "/api/items/some-id/image"},
+	} {
+		if res := h.do(httptest.NewRequest(c.method, c.path, nil)); res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, res.StatusCode, http.StatusUnauthorized)
+		}
+	}
+}
+
+// --- invites, members and switching ---------------------------------------------
+
+// inviteToken creates an invite as the owner and pulls the token out of the LINE link.
+func (h *harness) inviteToken(t *testing.T, householdID string) (token, url string) {
+	t.Helper()
+	res := h.signedIn(t, http.MethodPost, "/api/households/"+householdID+"/invites", "")
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("create invite: status = %d; body = %s", res.StatusCode, body(t, res))
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(body(t, res)), &got); err != nil {
+		t.Fatalf("decode invite: %v", err)
+	}
+	url, _ = got["url"].(string)
+	parts := strings.SplitN(url, "invite=", 2)
+	if len(parts) != 2 {
+		t.Fatalf("url %q carries no invite token", url)
+	}
+	return parts[1], url
+}
+
+// The owner sends a link, never a code. It must open inside LINE, not a browser.
+func TestTheInviteLinkOpensTheLiffApp(t *testing.T) {
+	h := newHarness(t)
+	_, url := h.inviteToken(t, h.withHousehold(t))
+
+	if !strings.HasPrefix(url, "https://liff.line.me/1234-abcd?invite=") {
+		t.Errorf("url = %q, want a liff.line.me link for this LIFF app", url)
+	}
+}
+
+func TestOnlyTheOwnerCanInvite(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	token, _ := h.inviteToken(t, hh)
+
+	mum := h.asUser(t, "user-mum", "แม่")
+	if res := h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", ""); res.StatusCode != http.StatusOK {
+		t.Fatalf("accept: status = %d", res.StatusCode)
+	}
+
+	// She is a member now, but ownership is about people and she is not the owner.
+	if res := h.doAs(t, mum, http.MethodPost, "/api/households/"+hh+"/invites", ""); res.StatusCode != http.StatusForbidden {
+		t.Errorf("member inviting: status = %d, want %d", res.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestAnOutsiderCannotInviteAndLearnsNothing(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	stranger := h.asUser(t, "user-stranger", "คนแปลกหน้า")
+
+	// 404 rather than 403: whether this household exists is not their business.
+	if res := h.doAs(t, stranger, http.MethodPost, "/api/households/"+hh+"/invites", ""); res.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestAcceptingAnInviteJoinsTheHousehold(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	token, _ := h.inviteToken(t, hh)
+	mum := h.asUser(t, "user-mum", "แม่")
+
+	res := h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", "")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", res.StatusCode, http.StatusOK, body(t, res))
+	}
+	var joined store.Household
+	if err := json.Unmarshal([]byte(body(t, res)), &joined); err != nil {
+		t.Fatalf("decode household: %v", err)
+	}
+	if joined.ID != hh {
+		t.Errorf("joined %q, want %q", joined.ID, hh)
+	}
+	if joined.IsOwner {
+		t.Error("the invitee is reported as the owner")
+	}
+
+	// ...and it is the household she lands in.
+	listed := decodeHouseholds(t, h.doAs(t, mum, http.MethodGet, "/api/households", ""))
+	if listed.CurrentID != hh {
+		t.Errorf("currentId = %q, want %q", listed.CurrentID, hh)
+	}
+}
+
+// Tapping the same LINE message twice must not produce a failure message.
+func TestAcceptingYourOwnInviteTwiceJustOpensTheHousehold(t *testing.T) {
+	h := newHarness(t)
+	token, _ := h.inviteToken(t, h.withHousehold(t))
+	mum := h.asUser(t, "user-mum", "แม่")
+
+	h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", "")
+	if res := h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", ""); res.StatusCode != http.StatusOK {
+		t.Errorf("second accept: status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+}
+
+// An invite grants membership to one person, not to everyone the link is forwarded to.
+func TestAnInviteCannotBeReusedBySomeoneElse(t *testing.T) {
+	h := newHarness(t)
+	token, _ := h.inviteToken(t, h.withHousehold(t))
+
+	mum := h.asUser(t, "user-mum", "แม่")
+	h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", "")
+
+	forwarded := h.asUser(t, "user-neighbour", "เพื่อนบ้าน")
+	if res := h.doAs(t, forwarded, http.MethodPost, "/api/invites/"+token+"/accept", ""); res.StatusCode != http.StatusConflict {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusConflict)
+	}
+}
+
+func TestAnUnknownInviteIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	h.withHousehold(t)
+
+	if res := h.signedIn(t, http.MethodPost, "/api/invites/no-such-token/accept", ""); res.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
+// A link that has run out is reported distinctly, because "try again" helps for an
+// expired invite in a way it does not for a used one.
+func TestAnExpiredInviteIsGone(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	token, _ := h.inviteToken(t, hh)
+	h.households.invites[token].expiresAt = time.Now().Add(-time.Minute)
+
+	mum := h.asUser(t, "user-mum", "แม่")
+	if res := h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", ""); res.StatusCode != http.StatusGone {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusGone)
+	}
+}
+
+func TestTheMemberListPutsTheOwnerFirst(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	token, _ := h.inviteToken(t, hh)
+	h.doAs(t, h.asUser(t, "user-mum", "แม่"), http.MethodPost, "/api/invites/"+token+"/accept", "")
+
+	var got struct {
+		Members []store.Member `json:"members"`
+	}
+	if err := json.Unmarshal([]byte(body(t, h.signedIn(t, http.MethodGet, "/api/households/"+hh+"/members", ""))), &got); err != nil {
+		t.Fatalf("decode members: %v", err)
+	}
+	if len(got.Members) != 2 {
+		t.Fatalf("got %d members, want 2", len(got.Members))
+	}
+	if !got.Members[0].IsOwner {
+		t.Error("the owner is not first in the member list")
+	}
+}
+
+func TestTheOwnerCanRemoveAMemberWhoThenLosesAccess(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	token, _ := h.inviteToken(t, hh)
+	mum := h.asUser(t, "user-mum", "แม่")
+	h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", "")
+
+	if res := h.signedIn(t, http.MethodDelete, "/api/households/"+hh+"/members/user-mum", ""); res.StatusCode != http.StatusNoContent {
+		t.Fatalf("remove: status = %d, want %d", res.StatusCode, http.StatusNoContent)
+	}
+
+	if listed := decodeHouseholds(t, h.doAs(t, mum, http.MethodGet, "/api/households", "")); len(listed.Households) != 0 {
+		t.Errorf("removed member still belongs to %d households", len(listed.Households))
+	}
+	if res := h.doAs(t, mum, http.MethodGet, "/api/households/"+hh+"/members", ""); res.StatusCode != http.StatusNotFound {
+		t.Errorf("removed member reading members: status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
+// Removing the owner would leave a household nobody can manage.
+func TestTheOwnerCannotRemoveThemselves(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+
+	if res := h.signedIn(t, http.MethodDelete, "/api/households/"+hh+"/members/user-uuid-1", ""); res.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestAMemberCannotRemoveAnyone(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	token, _ := h.inviteToken(t, hh)
+	mum := h.asUser(t, "user-mum", "แม่")
+	h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", "")
+
+	if res := h.doAs(t, mum, http.MethodDelete, "/api/households/"+hh+"/members/user-uuid-1", ""); res.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusForbidden)
+	}
+}
+
+// Ownership is about people, not about stock: every member manages the items.
+func TestAnyMemberCanAddItemsAndChangeQuantities(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	token, _ := h.inviteToken(t, hh)
+	mum := h.asUser(t, "user-mum", "แม่")
+	h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", "")
+
+	res := h.doAs(t, mum, http.MethodPost, "/api/households/"+hh+"/items", `{"name":"ผงซักฟอก","unit":"ถุง"}`)
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("member creating an item: status = %d, want %d", res.StatusCode, http.StatusCreated)
+	}
+	var item store.Item
+	json.Unmarshal([]byte(body(t, res)), &item)
+
+	if res := h.doAs(t, mum, http.MethodPost, "/api/items/"+item.ID+"/quantity", `{"delta":1}`); res.StatusCode != http.StatusOK {
+		t.Errorf("member adjusting quantity: status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+}
+
+// --- switching (#11) ------------------------------------------------------------
+
+func TestSelectingAHouseholdChangesWhereYouLand(t *testing.T) {
+	h := newHarness(t)
+	first := h.withHousehold(t)
+	second := h.withHousehold(t)
+
+	// Creating the second made it current; go back to the first.
+	if res := h.signedIn(t, http.MethodPost, "/api/households/"+first+"/select", ""); res.StatusCode != http.StatusNoContent {
+		t.Fatalf("select: status = %d, want %d", res.StatusCode, http.StatusNoContent)
+	}
+	if got := decodeHouseholds(t, h.signedIn(t, http.MethodGet, "/api/households", "")).CurrentID; got != first {
+		t.Errorf("currentId = %q, want %q", got, first)
+	}
+	if second == first {
+		t.Fatal("the two households are the same; the test proves nothing")
+	}
+}
+
+func TestSelectingAHouseholdYouAreNotInIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	stranger := h.asUser(t, "user-stranger", "คนแปลกหน้า")
+
+	if res := h.doAs(t, stranger, http.MethodPost, "/api/households/"+hh+"/select", ""); res.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestMemberAndInviteEndpointsRequireASession(t *testing.T) {
+	h := newHarness(t)
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/api/households/x/invites"},
+		{http.MethodGet, "/api/households/x/members"},
+		{http.MethodDelete, "/api/households/x/members/y"},
+		{http.MethodPost, "/api/households/x/select"},
+		{http.MethodPost, "/api/invites/t/accept"},
 	} {
 		if res := h.do(httptest.NewRequest(c.method, c.path, nil)); res.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, res.StatusCode, http.StatusUnauthorized)

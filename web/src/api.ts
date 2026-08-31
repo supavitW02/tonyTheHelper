@@ -173,3 +173,34 @@ export async function uploadItemPhoto(itemId: string, file: File): Promise<Item>
     body: JSON.stringify({ path }),
   })
 }
+
+/** A person in a household, as the members screen shows them. */
+export type Member = {
+  userId: string
+  displayName: string
+  pictureUrl?: string
+  isOwner: boolean
+}
+
+export const getMembers = (householdId: string) =>
+  request<{ members: Member[] }>(`/api/households/${householdId}/members`)
+
+/** Mints an invite and returns the LINE link to send. Owner only. */
+export const createInvite = (householdId: string) =>
+  request<{ url: string; expiresAt: string }>(`/api/households/${householdId}/invites`, { method: 'POST' })
+
+/** Revokes access. The person and their history are untouched. Owner only. */
+export const removeMember = async (householdId: string, userId: string): Promise<void> => {
+  const res = await fetch(`/api/households/${householdId}/members/${userId}`, { method: 'DELETE' })
+  if (!res.ok) throw new ApiError(res.status, 'could not remove the member')
+}
+
+/** Joins the household an invite belongs to. */
+export const acceptInvite = (token: string) =>
+  request<Household>(`/api/invites/${encodeURIComponent(token)}/accept`, { method: 'POST' })
+
+/** Records which household is being looked at, so the next open lands there. */
+export const selectHousehold = async (householdId: string): Promise<void> => {
+  const res = await fetch(`/api/households/${householdId}/select`, { method: 'POST' })
+  if (!res.ok) throw new ApiError(res.status, 'could not switch household')
+}

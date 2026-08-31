@@ -12,6 +12,7 @@ import {
 } from './api'
 import AddItemForm from './AddItemForm'
 import ItemRow from './ItemRow'
+import MembersPanel from './MembersPanel'
 
 /**
  * Orders items the way the server does: low stock first so it is noticed before running
@@ -29,6 +30,7 @@ export default function HouseholdScreen({ household, user }: { household: Househ
   const [items, setItems] = useState<Item[] | null>(null)
   const [units, setUnits] = useState<string[]>([])
   const [adding, setAdding] = useState(false)
+  const [showMembers, setShowMembers] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // Requests in flight per item. While any are outstanding the displayed quantity is
   // optimistic, so a rapid tapper is not left waiting on the network between taps.
@@ -83,11 +85,22 @@ export default function HouseholdScreen({ household, user }: { household: Househ
         {user.pictureUrl && (
           <img src={user.pictureUrl} alt="" className="size-10 shrink-0 rounded-full object-cover" referrerPolicy="no-referrer" />
         )}
-        <div className="flex min-w-0 flex-col">
-          <h2 className="truncate text-2xl font-semibold">{household.name}</h2>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <h2 className="text-2xl font-semibold break-words">{household.name}</h2>
           {household.isOwner && <span className="text-slate-500">เจ้าของบ้าน</span>}
         </div>
       </header>
+
+      <button
+        type="button"
+        onClick={() => setShowMembers((open) => !open)}
+        aria-expanded={showMembers}
+        className="min-h-12 self-start text-slate-600 underline underline-offset-4"
+      >
+        สมาชิกในบ้าน
+      </button>
+
+      {showMembers && <MembersPanel household={household} meId={user.id} />}
 
       {error && (
         <p aria-live="assertive" className="flex min-h-12 items-center gap-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-900">

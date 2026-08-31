@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/supavitW02/tonyTheHelper/api/internal/line"
 	"github.com/supavitW02/tonyTheHelper/api/internal/session"
@@ -33,6 +34,11 @@ type Users interface {
 type Households interface {
 	CreateHousehold(ctx context.Context, ownerID, name string) (store.Household, error)
 	HouseholdsForUser(ctx context.Context, userID string) ([]store.Household, error)
+	CreateInvite(ctx context.Context, householdID, ownerID string, now time.Time) (store.Invite, error)
+	AcceptInvite(ctx context.Context, token, userID string, now time.Time) (store.Household, error)
+	MembersOf(ctx context.Context, householdID, userID string) ([]store.Member, error)
+	RemoveMember(ctx context.Context, householdID, ownerID, targetUserID string) error
+	SetLastHousehold(ctx context.Context, userID, householdID string) error
 }
 
 // Items persists a household's stock and the log of every change to it.
@@ -84,6 +90,11 @@ func New(deps Deps) http.Handler {
 	mux.HandleFunc("POST /api/items/{itemId}/image", deps.requireUser(deps.requestImageUpload))
 	mux.HandleFunc("PUT /api/items/{itemId}/image", deps.requireUser(deps.confirmImageUpload))
 	mux.HandleFunc("GET /api/items/{itemId}/image", deps.requireUser(deps.serveImage))
+	mux.HandleFunc("POST /api/households/{householdId}/select", deps.requireUser(deps.selectHousehold))
+	mux.HandleFunc("POST /api/households/{householdId}/invites", deps.requireUser(deps.createInvite))
+	mux.HandleFunc("GET /api/households/{householdId}/members", deps.requireUser(deps.listMembers))
+	mux.HandleFunc("DELETE /api/households/{householdId}/members/{userId}", deps.requireUser(deps.removeMember))
+	mux.HandleFunc("POST /api/invites/{token}/accept", deps.requireUser(deps.acceptInvite))
 	mux.Handle("/", webApp(deps.Assets))
 	return mux
 }

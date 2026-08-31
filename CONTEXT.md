@@ -53,9 +53,9 @@ _Thai_: ประวัติการเปลี่ยนแปลง
 _Avoid_: transaction, adjustment, log entry, history, audit
 
 **Invite**:
-A signed, expiring token that grants one person membership of one household. Created by
-the owner, delivered as a LINE message, and consumed by opening it. Tapping a consumed
-invite is not an error — it simply opens the household.
+An unguessable, expiring token that grants one person membership of one household. Created
+by the owner, delivered as a LINE message, and consumed by opening it. Tapping an invite
+you have already used is not an error — it simply opens the household.
 _Thai_: คำเชิญ
 _Avoid_: invitation code, join code, token, link
 
