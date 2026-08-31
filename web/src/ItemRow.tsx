@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { getMovements, itemImageUrl, type Item, type ItemInput, type Movement } from './api'
 import IconPicker from './IconPicker'
+import QuantityDiff from './QuantityDiff'
 import { dangerButtonClass, inputClass, primaryButtonClass, secondaryButtonClass } from './ui'
 
 type Panel = null | 'total' | 'history' | 'edit' | 'photo'
@@ -295,8 +296,12 @@ function History({ itemId, unit }: { itemId: string; unit: string }) {
         <ul className="flex flex-col gap-3">
           {movements.map((m) => (
             <li key={m.id} className="flex flex-col">
-              <span>
-                <strong className="font-medium">{m.actorName}</strong> {m.quantityBefore} → {m.quantityAfter} {unit}
+              <span className="break-words">
+                <strong className="font-medium">{m.actorName}</strong>{' '}
+                <span className="whitespace-nowrap">
+                  {m.quantityBefore} → {m.quantityAfter} {unit}
+                </span>{' '}
+                <QuantityDiff before={m.quantityBefore} after={m.quantityAfter} />
               </span>
               <span className="text-slate-600">
                 {new Date(m.createdAt).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}
