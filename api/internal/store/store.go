@@ -262,6 +262,9 @@ type Item struct {
 	// IsLow is derived in SQL, both to sort low items to the top and so the UI never
 	// has to repeat the comparison and risk disagreeing with the ordering.
 	IsLow bool `json:"isLow"`
+	// HasImage rather than the path itself: where an item's photo lives in object
+	// storage is not the browser's business, and the URL is minted per request anyway.
+	HasImage bool `json:"hasImage"`
 }
 
 // ItemInput is the writable half of an item, shared by create and update.
@@ -286,14 +289,16 @@ type Movement struct {
 // itemColumns is the projection every item read shares, including the derived low flag.
 const itemColumns = `i.id, i.name, i.unit, coalesce(i.description, ''), i.quantity,
 	i.low_stock_threshold,
-	(i.low_stock_threshold is not null and i.quantity <= i.low_stock_threshold) as is_low`
+	(i.low_stock_threshold is not null and i.quantity <= i.low_stock_threshold) as is_low,
+	(i.image_path is not null) as has_image`
 
 const insertItem = `
 insert into items (household_id, name, unit, description, low_stock_threshold, created_by)
 select $1, $2, $3, nullif($4, ''), $5, $6
 where exists (select 1 from household_members where household_id = $1 and user_id = $6)
 returning id, name, unit, coalesce(description, ''), quantity, low_stock_threshold,
-          (low_stock_threshold is not null and quantity <= low_stock_threshold) as is_low`
+          (low_stock_threshold is not null and quantity <= low_stock_threshold) as is_low,
+          (image_path is not null) as has_image`
 
 // CreateItem adds an item to a household.
 //
@@ -305,7 +310,7 @@ func (db *DB) CreateItem(ctx context.Context, householdID, userID string, in Ite
 	var i Item
 	err := db.pool.QueryRow(ctx, insertItem,
 		householdID, in.Name, in.Unit, in.Description, in.LowStockThreshold, userID).
-		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow)
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -342,7 +347,7 @@ func (db *DB) ItemsForHousehold(ctx context.Context, householdID, userID string)
 	for rows.Next() {
 		var i Item
 		if err := rows.Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity,
-			&i.LowStockThreshold, &i.IsLow); err != nil {
+			&i.LowStockThreshold, &i.IsLow, &i.HasImage); err != nil {
 			return nil, fmt.Errorf("store: scan item: %w", err)
 		}
 		items = append(items, i)
@@ -396,7 +401,8 @@ type QuantityChange struct {
 }
 
 const lockItemForUpdate = `
-select i.quantity, i.name, i.unit, coalesce(i.description, ''), i.low_stock_threshold
+select i.quantity, i.name, i.unit, coalesce(i.description, ''), i.low_stock_threshold,
+       (i.image_path is not null) as has_image
 from items i
 join household_members m on m.household_id = i.household_id and m.user_id = $2
 where i.id = $1 and i.deleted_at is null
@@ -427,7 +433,7 @@ func (db *DB) AdjustQuantity(ctx context.Context, itemID, userID string, change 
 	var before int
 	item := Item{ID: itemID}
 	err = tx.QueryRow(ctx, lockItemForUpdate, itemID, userID).
-		Scan(&before, &item.Name, &item.Unit, &item.Description, &item.LowStockThreshold)
+		Scan(&before, &item.Name, &item.Unit, &item.Description, &item.LowStockThreshold, &item.HasImage)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -491,7 +497,8 @@ where i.id = $1
   and i.deleted_at is null
   and exists (select 1 from household_members m where m.household_id = i.household_id and m.user_id = $2)
 returning i.id, i.name, i.unit, coalesce(i.description, ''), i.quantity, i.low_stock_threshold,
-          (i.low_stock_threshold is not null and i.quantity <= i.low_stock_threshold) as is_low`
+          (i.low_stock_threshold is not null and i.quantity <= i.low_stock_threshold) as is_low,
+          (i.image_path is not null) as has_image`
 
 // UpdateItem changes an item's editable fields. It deliberately cannot touch quantity:
 // that only ever moves through AdjustQuantity, so every change is recorded (ADR-0001).
@@ -499,7 +506,7 @@ func (db *DB) UpdateItem(ctx context.Context, itemID, userID string, in ItemInpu
 	var i Item
 	err := db.pool.QueryRow(ctx, updateItemFields,
 		itemID, userID, in.Name, in.Unit, in.Description, in.LowStockThreshold).
-		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow)
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -578,4 +585,79 @@ func (db *DB) MovementsForItem(ctx context.Context, itemID, userID string) ([]Mo
 		return nil, fmt.Errorf("store: movements for item: %w", err)
 	}
 	return movements, nil
+}
+
+const setImagePath = `
+update items i
+set image_path = $3, updated_at = now()
+where i.id = $1
+  and i.deleted_at is null
+  and exists (select 1 from household_members m where m.household_id = i.household_id and m.user_id = $2)
+returning ` + itemColumns
+
+// SetItemImage records where an item's photo lives, after the browser has uploaded it.
+func (db *DB) SetItemImage(ctx context.Context, itemID, userID, path string) (Item, error) {
+	var i Item
+	err := db.pool.QueryRow(ctx, setImagePath, itemID, userID, path).
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage)
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Item{}, ErrNotFound
+	case err != nil:
+		if isInvalidUUID(err) {
+			return Item{}, ErrNotFound
+		}
+		return Item{}, fmt.Errorf("store: set item image: %w", err)
+	}
+	return i, nil
+}
+
+const selectImagePath = `
+select i.image_path
+from items i
+join household_members m on m.household_id = i.household_id and m.user_id = $2
+where i.id = $1 and i.deleted_at is null and i.image_path is not null`
+
+// ItemImagePath returns where an item's photo lives, for a member of its household.
+func (db *DB) ItemImagePath(ctx context.Context, itemID, userID string) (string, error) {
+	var path string
+	err := db.pool.QueryRow(ctx, selectImagePath, itemID, userID).Scan(&path)
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", ErrNotFound
+	case err != nil:
+		if isInvalidUUID(err) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("store: item image path: %w", err)
+	}
+	return path, nil
+}
+
+const selectItemAccess = `
+select 1
+from items i
+join household_members m on m.household_id = i.household_id and m.user_id = $2
+where i.id = $1 and i.deleted_at is null`
+
+// ItemAccessible reports whether a user may act on an item, without reading it.
+//
+// Needed before minting an upload URL: a signed URL is a capability, so handing one out
+// for an item id the caller cannot touch would let them overwrite another household's photo.
+func (db *DB) ItemAccessible(ctx context.Context, itemID, userID string) error {
+	var one int
+	err := db.pool.QueryRow(ctx, selectItemAccess, itemID, userID).Scan(&one)
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ErrNotFound
+	case err != nil:
+		if isInvalidUUID(err) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("store: item accessible: %w", err)
+	}
+	return nil
 }

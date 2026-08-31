@@ -110,6 +110,7 @@ type fakeItems struct {
 	itemHousehold map[string]string
 	deleted       map[string]bool
 	movements     map[string][]store.Movement
+	imagePaths    map[string]string
 	err           error
 	nextID        int
 }
@@ -121,6 +122,7 @@ func newFakeItems(h *fakeHouseholds) *fakeItems {
 		itemHousehold: map[string]string{},
 		deleted:       map[string]bool{},
 		movements:     map[string][]store.Movement{},
+		imagePaths:    map[string]string{},
 	}
 }
 
@@ -280,12 +282,73 @@ func (f *fakeItems) MovementsForItem(_ context.Context, itemID, userID string) (
 	return out, nil
 }
 
+func (f *fakeItems) ItemAccessible(_ context.Context, itemID, userID string) error {
+	if f.err != nil {
+		return f.err
+	}
+	if _, ok := f.find(itemID, userID); !ok {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (f *fakeItems) SetItemImage(_ context.Context, itemID, userID, path string) (store.Item, error) {
+	if f.err != nil {
+		return store.Item{}, f.err
+	}
+	item, ok := f.find(itemID, userID)
+	if !ok {
+		return store.Item{}, store.ErrNotFound
+	}
+	f.imagePaths[itemID] = path
+	item.HasImage = true
+	return *item, nil
+}
+
+func (f *fakeItems) ItemImagePath(_ context.Context, itemID, userID string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	if _, ok := f.find(itemID, userID); !ok {
+		return "", store.ErrNotFound
+	}
+	path, ok := f.imagePaths[itemID]
+	if !ok {
+		return "", store.ErrNotFound
+	}
+	return path, nil
+}
+
+// fakeStorage records what was signed instead of talking to Supabase.
+type fakeStorage struct {
+	signedUploads   []string
+	signedDownloads []string
+	err             error
+}
+
+func (f *fakeStorage) SignUpload(_ context.Context, path string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	f.signedUploads = append(f.signedUploads, path)
+	return "https://storage.test/upload/" + path + "?token=fake", nil
+}
+
+func (f *fakeStorage) SignDownload(_ context.Context, path string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	f.signedDownloads = append(f.signedDownloads, path)
+	return "https://storage.test/read/" + path + "?token=fake", nil
+}
+
 type harness struct {
 	handler    http.Handler
 	verifier   *fakeVerifier
 	users      *fakeUsers
 	households *fakeHouseholds
 	items      *fakeItems
+	storage    *fakeStorage
 	sessions   *session.Manager
 }
 
@@ -299,17 +362,19 @@ func newHarness(t *testing.T) *harness {
 	u := newFakeUsers()
 	hh := newFakeHouseholds()
 	it := newFakeItems(hh)
+	st := &fakeStorage{}
 	s := session.NewManager(testSecret)
 
 	return &harness{
 		handler: server.New(server.Deps{
 			Assets: assets(), LiffID: "1234-abcd",
-			Verifier: v, Users: u, Households: hh, Items: it, Sessions: s,
+			Verifier: v, Users: u, Households: hh, Items: it, Storage: st, Sessions: s,
 		}),
 		verifier:   v,
 		users:      u,
 		households: hh,
 		items:      it,
+		storage:    st,
 		sessions:   s,
 	}
 }
@@ -1128,6 +1193,160 @@ func TestNewItemEndpointsRequireASession(t *testing.T) {
 			req = httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
 		}
 		if res := h.do(req); res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, res.StatusCode, http.StatusUnauthorized)
+		}
+	}
+}
+
+// --- item photos ----------------------------------------------------------------
+
+func TestRequestingAnUploadUrlSignsTheItemsPath(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"น้ำปลา","unit":"ขวด"}`)
+
+	res := h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/image", "")
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", res.StatusCode, http.StatusOK, body(t, res))
+	}
+	var got map[string]string
+	if err := json.Unmarshal([]byte(body(t, res)), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["uploadUrl"] == "" {
+		t.Error("no uploadUrl returned")
+	}
+	if len(h.storage.signedUploads) != 1 || !strings.HasPrefix(h.storage.signedUploads[0], "items/"+item.ID+"/") {
+		t.Errorf("signed uploads = %v, want a path under the item's own prefix", h.storage.signedUploads)
+	}
+	if got["path"] == "" {
+		t.Error("no path returned; the client cannot confirm the upload without it")
+	}
+}
+
+// A signed URL is a capability. Handing one out for an item the caller cannot touch
+// would let them overwrite another household's photo.
+func TestNoUploadUrlForAnItemTheCallerCannotTouch(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"น้ำปลา","unit":"ขวด"}`)
+
+	outsider := newHarness(t)
+	outsider.households.byUser["user-uuid-1"] = nil
+	outsider.items.itemHousehold[item.ID] = "someone-elses-household"
+
+	res := outsider.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/image", "")
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+	if len(outsider.storage.signedUploads) != 0 {
+		t.Errorf("signed %d uploads for an inaccessible item, want 0", len(outsider.storage.signedUploads))
+	}
+}
+
+// The item must not claim to have a photo until the upload is confirmed, or a failed
+// transfer leaves a permanently broken thumbnail.
+func TestAnItemHasNoImageUntilTheUploadIsConfirmed(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"น้ำปลา","unit":"ขวด"}`)
+
+	if item.HasImage {
+		t.Error("a new item claims to have an image")
+	}
+
+	path := h.requestUpload(t, item.ID)
+	res := h.signedIn(t, http.MethodGet, "/api/households/"+h.households.byUser["user-uuid-1"][0].ID+"/items", "")
+	if decodeItems(t, res).Items[0].HasImage {
+		t.Error("item claims to have an image after only requesting an upload url")
+	}
+
+	if res := h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/image", `{"path":"`+path+`"}`); res.StatusCode != http.StatusOK {
+		t.Fatalf("confirm status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+
+	after := decodeItems(t, h.signedIn(t, http.MethodGet, "/api/households/"+h.households.byUser["user-uuid-1"][0].ID+"/items", ""))
+	if !after.Items[0].HasImage {
+		t.Error("item does not have an image after confirmation")
+	}
+}
+
+func TestServingAnImageRedirectsToASignedUrl(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"น้ำปลา","unit":"ขวด"}`)
+	path := h.requestUpload(t, item.ID)
+	h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/image", `{"path":"`+path+`"}`)
+
+	res := h.signedIn(t, http.MethodGet, "/api/items/"+item.ID+"/image", "")
+
+	if res.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusFound)
+	}
+	if location := res.Header.Get("Location"); location == "" {
+		t.Error("redirect has no Location header")
+	}
+	if len(h.storage.signedDownloads) != 1 {
+		t.Errorf("signed %d downloads, want 1", len(h.storage.signedDownloads))
+	}
+}
+
+// requestUpload asks for an upload url and returns the path the server chose.
+func (h *harness) requestUpload(t *testing.T, itemID string) string {
+	t.Helper()
+	res := h.signedIn(t, http.MethodPost, "/api/items/"+itemID+"/image", "")
+	var got map[string]string
+	if err := json.Unmarshal([]byte(body(t, res)), &got); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	return got["path"]
+}
+
+// The path comes back from the client, so an item must not be pointable at an arbitrary
+// object — including another household's photo.
+func TestConfirmingRejectsAPathOutsideTheItemsPrefix(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"น้ำปลา","unit":"ขวด"}`)
+
+	for label, path := range map[string]string{
+		"another item":   "items/some-other-item/abc.jpg",
+		"bucket root":    "secret.jpg",
+		"path traversal": "items/" + item.ID + "/../../secret.jpg",
+	} {
+		res := h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/image", `{"path":"`+path+`"}`)
+		if res.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want %d", label, res.StatusCode, http.StatusBadRequest)
+		}
+	}
+}
+
+func TestServingAnImageForAnItemWithoutOneIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"น้ำปลา","unit":"ขวด"}`)
+
+	if res := h.signedIn(t, http.MethodGet, "/api/items/"+item.ID+"/image", ""); res.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
+// Storage being unreachable is an upstream fault, not a missing image.
+func TestStorageFailureIsReportedAsAnUpstreamFault(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"น้ำปลา","unit":"ขวด"}`)
+	h.storage.err = errors.New("dial tcp: connection refused")
+
+	if res := h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/image", ""); res.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusBadGateway)
+	}
+}
+
+func TestImageEndpointsRequireASession(t *testing.T) {
+	h := newHarness(t)
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/api/items/some-id/image"},
+		{http.MethodPut, "/api/items/some-id/image"},
+		{http.MethodGet, "/api/items/some-id/image"},
+	} {
+		if res := h.do(httptest.NewRequest(c.method, c.path, nil)); res.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, res.StatusCode, http.StatusUnauthorized)
 		}
 	}

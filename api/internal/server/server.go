@@ -44,6 +44,16 @@ type Items interface {
 	UpdateItem(ctx context.Context, itemID, userID string, in store.ItemInput) (store.Item, error)
 	DeleteItem(ctx context.Context, itemID, userID string) error
 	MovementsForItem(ctx context.Context, itemID, userID string) ([]store.Movement, error)
+	ItemAccessible(ctx context.Context, itemID, userID string) error
+	SetItemImage(ctx context.Context, itemID, userID, path string) (store.Item, error)
+	ItemImagePath(ctx context.Context, itemID, userID string) (string, error)
+}
+
+// Storage mints short-lived URLs so photo bytes go straight between the phone and object
+// storage, never through this API.
+type Storage interface {
+	SignUpload(ctx context.Context, path string) (string, error)
+	SignDownload(ctx context.Context, path string) (string, error)
 }
 
 type Deps struct {
@@ -53,6 +63,7 @@ type Deps struct {
 	Users      Users
 	Households Households
 	Items      Items
+	Storage    Storage
 	Sessions   *session.Manager
 }
 
@@ -70,6 +81,9 @@ func New(deps Deps) http.Handler {
 	mux.HandleFunc("PUT /api/items/{itemId}", deps.requireUser(deps.updateItem))
 	mux.HandleFunc("DELETE /api/items/{itemId}", deps.requireUser(deps.deleteItem))
 	mux.HandleFunc("GET /api/items/{itemId}/movements", deps.requireUser(deps.listMovements))
+	mux.HandleFunc("POST /api/items/{itemId}/image", deps.requireUser(deps.requestImageUpload))
+	mux.HandleFunc("PUT /api/items/{itemId}/image", deps.requireUser(deps.confirmImageUpload))
+	mux.HandleFunc("GET /api/items/{itemId}/image", deps.requireUser(deps.serveImage))
 	mux.Handle("/", webApp(deps.Assets))
 	return mux
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-import { getMovements, type Item, type ItemInput, type Movement } from './api'
+import { getMovements, itemImageUrl, type Item, type ItemInput, type Movement } from './api'
 
 type Panel = null | 'total' | 'history' | 'edit'
 
@@ -17,12 +17,14 @@ export default function ItemRow({
   onSetTotal,
   onSave,
   onDelete,
+  onPhoto,
 }: {
   item: Item
   onStep: (delta: number) => void
   onSetTotal: (quantity: number, note: string) => void
   onSave: (input: ItemInput) => Promise<void>
   onDelete: () => Promise<void>
+  onPhoto: (file: File) => Promise<void>
 }) {
   const [panel, setPanel] = useState<Panel>(null)
   const toggle = (next: Exclude<Panel, null>) => setPanel((open) => (open === next ? null : next))
@@ -30,6 +32,7 @@ export default function ItemRow({
   return (
     <li className="flex flex-col gap-3 rounded-xl border-2 border-slate-200 p-4">
       <div className="flex items-center gap-4">
+        <Thumbnail item={item} />
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <span className="truncate text-xl font-medium">{item.name}</span>
           {/* Marked with a symbol and words, never colour alone. */}
@@ -87,9 +90,35 @@ export default function ItemRow({
             setPanel(null)
           }}
           onDelete={onDelete}
+          onPhoto={onPhoto}
         />
       )}
     </li>
+  )
+}
+
+/**
+ * The item's photo, or a neutral stand-in. An item without one must look deliberate
+ * rather than broken, since most items will never have a photo.
+ */
+function Thumbnail({ item }: { item: Item }) {
+  if (!item.hasImage) {
+    return (
+      <span
+        aria-hidden="true"
+        className="flex size-14 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-2xl"
+      >
+        🧴
+      </span>
+    )
+  }
+  return (
+    <img
+      src={itemImageUrl(item.id)}
+      alt={item.name}
+      loading="lazy"
+      className="size-14 shrink-0 rounded-xl bg-slate-100 object-cover"
+    />
   )
 }
 
@@ -249,11 +278,13 @@ function EditForm({
   item,
   onSave,
   onDelete,
+  onPhoto,
   onCancel,
 }: {
   item: Item
   onSave: (input: ItemInput) => Promise<void>
   onDelete: () => Promise<void>
+  onPhoto: (file: File) => Promise<void>
   onCancel: () => void
 }) {
   const [name, setName] = useState(item.name)
@@ -281,6 +312,8 @@ function EditForm({
         รายละเอียด (ไม่บังคับ)
       </label>
       <input id={`desc-${item.id}`} type="text" value={description} maxLength={500} onChange={(e) => setDescription(e.target.value)} className={inputClass} />
+
+      <PhotoPicker item={item} onPhoto={onPhoto} />
 
       <label htmlFor={`low-${item.id}`} className="font-medium">
         เตือนเมื่อเหลือน้อยกว่าหรือเท่ากับ (ไม่บังคับ)
@@ -350,6 +383,45 @@ function EditForm({
           ลบของนี้
         </button>
       )}
+    </div>
+  )
+}
+
+/** Choosing a photo. accept="image/*" is what offers the camera or the gallery on a phone. */
+function PhotoPicker({ item, onPhoto }: { item: Item; onPhoto: (file: File) => Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  return (
+    <div className="flex flex-col gap-2">
+      <label htmlFor={`photo-${item.id}`} className="font-medium">
+        รูปภาพ (ไม่บังคับ)
+      </label>
+      <input
+        id={`photo-${item.id}`}
+        type="file"
+        accept="image/*"
+        disabled={busy}
+        onChange={async (e) => {
+          const file = e.target.files?.[0]
+          if (!file) return
+          setBusy(true)
+          setFailed(false)
+          try {
+            await onPhoto(file)
+          } catch (err) {
+            console.error('photo upload failed', err)
+            setFailed(true)
+          } finally {
+            setBusy(false)
+            // Clear the input so picking the same file again still fires a change.
+            e.target.value = ''
+          }
+        }}
+        className="min-h-14 w-full rounded-xl border-2 border-slate-300 px-4 py-3"
+      />
+      {busy && <p className="text-slate-600">กำลังอัปโหลดรูป…</p>}
+      {failed && <p className="text-amber-900">อัปโหลดรูปไม่สำเร็จ กรุณาลองใหม่</p>}
     </div>
   )
 }

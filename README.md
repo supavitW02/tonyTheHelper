@@ -66,6 +66,9 @@ with `fly secrets set`, never in `fly.toml`.
 | `LINE_CHANNEL_ID` | LINE Login channel id; ID tokens must be issued for it |
 | `LINE_LIFF_ID` | The LIFF app id. Public — served to the frontend at runtime, so changing it needs no rebuild |
 | `SESSION_SECRET` | Signs session cookies. At least 32 bytes |
+| `SUPABASE_URL` | Supabase project URL, for object storage |
+| `SUPABASE_SERVICE_ROLE_KEY` | Signs storage URLs. Bypasses RLS — server only, never sent to the browser |
+| `SUPABASE_STORAGE_BUCKET` | Optional, defaults to `item-images`. Must be a **private** bucket |
 | `PORT` | Optional, defaults to 8080 |
 
 ## Running it locally

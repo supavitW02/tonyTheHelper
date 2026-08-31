@@ -20,6 +20,7 @@ import (
 	"github.com/supavitW02/tonyTheHelper/api/internal/line"
 	"github.com/supavitW02/tonyTheHelper/api/internal/server"
 	"github.com/supavitW02/tonyTheHelper/api/internal/session"
+	"github.com/supavitW02/tonyTheHelper/api/internal/storage"
 	"github.com/supavitW02/tonyTheHelper/api/internal/store"
 )
 
@@ -70,6 +71,7 @@ func run() error {
 			Users:      db,
 			Households: db,
 			Items:      db,
+			Storage:    storage.New(cfg.SupabaseURL, cfg.SupabaseBucket, cfg.SupabaseServiceKey),
 			Sessions:   session.NewManager(cfg.SessionSecret),
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
