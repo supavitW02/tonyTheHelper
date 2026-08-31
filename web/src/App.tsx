@@ -1,14 +1,30 @@
 import { useEffect, useState } from 'react'
 
-type Health = 'checking' | 'ok' | 'unreachable'
+import type { User } from './api'
+import { resolveUser } from './signIn'
 
-/**
- * The walking skeleton (issue #1): a Thai page, served by the Go binary it is
- * embedded in, that proves the whole path works by calling the API's own health
- * check. Every later ticket replaces this content.
- */
+type State = { status: 'loading' } | { status: 'signedIn'; user: User } | { status: 'failed'; message: string }
+
 export default function App() {
-  const health = useHealth()
+  const [state, setState] = useState<State>({ status: 'loading' })
+
+  useEffect(() => {
+    let cancelled = false
+
+    resolveUser()
+      .then((user) => {
+        if (!cancelled) setState({ status: 'signedIn', user })
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        console.error('sign-in failed', err)
+        setState({ status: 'failed', message: 'เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง' })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-8 px-6 py-12">
@@ -16,66 +32,61 @@ export default function App() {
         <h1 className="text-3xl font-semibold">ของใช้ในบ้าน</h1>
         <p className="text-slate-600">ระบบจัดการของใช้ในบ้านสำหรับครอบครัว</p>
       </header>
-      <ServerStatus health={health} />
+
+      {state.status === 'loading' && <Message>กำลังเข้าสู่ระบบ…</Message>}
+      {state.status === 'signedIn' && <Greeting user={state.user} />}
+      {state.status === 'failed' && <Failure message={state.message} />}
     </main>
   )
 }
 
-function useHealth(): Health {
-  const [health, setHealth] = useState<Health>('checking')
-
-  useEffect(() => {
-    const aborted = new AbortController()
-
-    fetch('/healthz', { signal: aborted.signal })
-      .then((res) => {
-        if (!res.ok) throw new Error(`healthz returned ${res.status}`)
-        setHealth('ok')
-      })
-      .catch((err: unknown) => {
-        if (err instanceof Error && err.name === 'AbortError') return
-        setHealth('unreachable')
-      })
-
-    return () => aborted.abort()
-  }, [])
-
-  return health
-}
-
-// Status is carried by both a symbol and words, never by colour alone — the app's
-// primary user should not have to distinguish red from green to understand it.
-const STATUS: Record<Health, { mark: string; label: string; className: string }> = {
-  checking: {
-    mark: '…',
-    label: 'กำลังเชื่อมต่อเซิร์ฟเวอร์',
-    className: 'bg-slate-100 text-slate-700',
-  },
-  ok: {
-    mark: '✓',
-    label: 'เชื่อมต่อเซิร์ฟเวอร์แล้ว',
-    className: 'bg-emerald-50 text-emerald-900',
-  },
-  unreachable: {
-    mark: '✕',
-    label: 'เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ',
-    className: 'bg-amber-50 text-amber-900',
-  },
-}
-
-function ServerStatus({ health }: { health: Health }) {
-  const { mark, label, className } = STATUS[health]
-
+function Message({ children }: { children: React.ReactNode }) {
   return (
-    <p
-      // aria-live so the status is announced when it resolves, not silently swapped.
-      aria-live="polite"
-      className={`flex min-h-12 items-center gap-3 rounded-xl px-4 py-3 ${className}`}
-    >
-      <span aria-hidden="true" className="text-2xl leading-none">
-        {mark}
-      </span>
-      <span>{label}</span>
+    <p aria-live="polite" className="flex min-h-12 items-center rounded-xl bg-slate-100 px-4 py-3 text-slate-700">
+      {children}
     </p>
+  )
+}
+
+function Greeting({ user }: { user: User }) {
+  return (
+    <section aria-live="polite" className="flex items-center gap-4 rounded-xl bg-emerald-50 px-4 py-4">
+      {user.pictureUrl ? (
+        <img
+          src={user.pictureUrl}
+          alt=""
+          className="size-16 shrink-0 rounded-full object-cover"
+          referrerPolicy="no-referrer"
+        />
+      ) : (
+        <span aria-hidden="true" className="flex size-16 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-2xl">
+          👤
+        </span>
+      )}
+      <span className="text-emerald-900">
+        สวัสดี <strong className="font-semibold">{user.displayName}</strong>
+      </span>
+    </section>
+  )
+}
+
+function Failure({ message }: { message: string }) {
+  return (
+    <section aria-live="assertive" className="flex flex-col gap-4">
+      <p className="flex min-h-12 items-center gap-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-900">
+        <span aria-hidden="true" className="text-2xl leading-none">
+          ✕
+        </span>
+        <span>{message}</span>
+      </p>
+      {/* A full reload restarts the whole sign-in flow, including LIFF's own state. */}
+      <button
+        type="button"
+        onClick={() => window.location.reload()}
+        className="min-h-12 rounded-xl bg-slate-900 px-4 py-3 font-medium text-white"
+      >
+        ลองใหม่
+      </button>
+    </section>
   )
 }

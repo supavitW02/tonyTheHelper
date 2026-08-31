@@ -9,18 +9,33 @@ jobs:
   api:
     name: Go
     runs-on: ubuntu-latest
+    # The store tests run against a real Postgres on purpose: an upsert, a unique
+    # constraint and a uuid cast are exactly what a fake would get wrong.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: tth
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
           go-version-file: api/go.mod
-          # No dependencies yet, so there is no go.sum to key a cache on.
-          # Turn this back on when the first module is added.
-          cache: false
+          cache-dependency-path: api/go.sum
       - run: go vet ./...
         working-directory: api
       - run: go test ./... -race
         working-directory: api
+        env:
+          TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/tth?sslmode=disable
 
   web:
     name: Web
