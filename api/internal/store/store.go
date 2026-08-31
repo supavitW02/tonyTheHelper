@@ -590,6 +590,17 @@ func (db *DB) DeleteItem(ctx context.Context, itemID, userID string) error {
 	return nil
 }
 
+// ItemHistoryLimit caps how much of one item's history is returned.
+//
+// A shared household accumulates changes indefinitely — a jar of fish sauce touched twice
+// a week is a hundred rows a year — and the question this panel answers is always about
+// the recent past: who used the last one, and when. Ten is what fits on a phone without
+// the row's own controls scrolling out of reach.
+const ItemHistoryLimit = 10
+
+// HouseholdHistoryLimit caps the household-wide history.
+const HouseholdHistoryLimit = 30
+
 const selectMovements = `
 select sm.id, u.display_name, coalesce(u.picture_url, ''),
        sm.quantity_before, sm.quantity_after, coalesce(sm.note, ''), sm.created_at
@@ -598,14 +609,17 @@ join items i on i.id = sm.item_id
 join users u on u.id = sm.user_id
 join household_members m on m.household_id = i.household_id and m.user_id = $2
 where sm.item_id = $1
-order by sm.created_at desc`
+-- id breaks ties so a limit always keeps the same rows. Two changes can share a
+-- created_at, and without a tiebreaker which of them survives the cut is arbitrary.
+order by sm.created_at desc, sm.id desc
+limit $3`
 
 // MovementsForItem returns an item's history, newest first.
 //
 // Deleted items are deliberately not excluded: the history is the reason the item is
 // soft-deleted rather than removed, so it stays readable afterwards.
 func (db *DB) MovementsForItem(ctx context.Context, itemID, userID string) ([]Movement, error) {
-	rows, err := db.pool.Query(ctx, selectMovements, itemID, userID)
+	rows, err := db.pool.Query(ctx, selectMovements, itemID, userID, ItemHistoryLimit)
 	if err != nil {
 		if isInvalidUUID(err) {
 			return nil, ErrNotFound
@@ -627,6 +641,161 @@ func (db *DB) MovementsForItem(ctx context.Context, itemID, userID string) ([]Mo
 		return nil, fmt.Errorf("store: movements for item: %w", err)
 	}
 	return movements, nil
+}
+
+// HouseholdMovement is a change to any item in a household.
+//
+// It carries the item it belongs to, which a single item's history does not need, and
+// deliberately carries no picture: this is a list of changes to read down, not a list of
+// people to look at.
+type HouseholdMovement struct {
+	ID             string    `json:"id"`
+	ItemID         string    `json:"itemId"`
+	ItemName       string    `json:"itemName"`
+	Unit           string    `json:"unit"`
+	ActorName      string    `json:"actorName"`
+	QuantityBefore int       `json:"quantityBefore"`
+	QuantityAfter  int       `json:"quantityAfter"`
+	Note           string    `json:"note,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
+// MovementFilter narrows the household history. A zero filter means everything.
+type MovementFilter struct {
+	// ItemID limits the result to one item. Empty means every item.
+	ItemID string
+	// Query matches the item's name or the note left with the change. Empty means no
+	// text search.
+	Query string
+	Limit int
+}
+
+// ItemRef is just enough of an item to name it in a filter.
+type ItemRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+const selectHouseholdMovements = `
+select sm.id, i.id, i.name, i.unit, u.display_name,
+       sm.quantity_before, sm.quantity_after, coalesce(sm.note, ''), sm.created_at
+from stock_movements sm
+join items i on i.id = sm.item_id
+join users u on u.id = sm.user_id
+where i.household_id = $1
+  and ($2::uuid is null or i.id = $2::uuid)
+  -- strpos rather than like: the query is a substring, not a pattern, so a % or _ typed
+  -- into the search box is matched literally instead of matching everything.
+  and ($3::text is null
+       or strpos(lower(i.name), lower($3)) > 0
+       or strpos(lower(coalesce(sm.note, '')), lower($3)) > 0)
+order by sm.created_at desc, sm.id desc
+limit $4`
+
+// MovementsForHousehold returns recent changes across every item in a household, newest
+// first, optionally narrowed to one item or to a search term.
+//
+// A deleted item's changes are included, for the same reason MovementsForItem includes
+// them: the history is why an item is soft-deleted rather than removed (ADR-0001).
+func (db *DB) MovementsForHousehold(ctx context.Context, householdID, userID string, filter MovementFilter) ([]HouseholdMovement, error) {
+	// Checked before the query rather than joined into it, so an outsider gets
+	// ErrNotFound instead of an empty list that looks like "nothing has happened here".
+	member, err := db.IsMember(ctx, householdID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !member {
+		return nil, ErrNotFound
+	}
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = HouseholdHistoryLimit
+	}
+
+	rows, err := db.pool.Query(ctx, selectHouseholdMovements,
+		householdID, nullableID(filter.ItemID), nullableText(filter.Query), limit)
+	if err != nil {
+		if isInvalidUUID(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: movements for household: %w", err)
+	}
+	defer rows.Close()
+
+	movements := []HouseholdMovement{}
+	for rows.Next() {
+		var m HouseholdMovement
+		if err := rows.Scan(&m.ID, &m.ItemID, &m.ItemName, &m.Unit, &m.ActorName,
+			&m.QuantityBefore, &m.QuantityAfter, &m.Note, &m.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan household movement: %w", err)
+		}
+		movements = append(movements, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: movements for household: %w", err)
+	}
+	return movements, nil
+}
+
+const selectItemsWithHistory = `
+select distinct i.id, i.name
+from items i
+join stock_movements sm on sm.item_id = i.id
+where i.household_id = $1
+order by i.name`
+
+// ItemsWithHistory lists the household's items that have at least one recorded change.
+//
+// This is what the filter offers, so it is the items with something to show rather than
+// the items currently in stock: an item that has since been deleted still has a history
+// worth reading, and one that has never moved would be a dead end in the list.
+func (db *DB) ItemsWithHistory(ctx context.Context, householdID, userID string) ([]ItemRef, error) {
+	member, err := db.IsMember(ctx, householdID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !member {
+		return nil, ErrNotFound
+	}
+
+	rows, err := db.pool.Query(ctx, selectItemsWithHistory, householdID)
+	if err != nil {
+		if isInvalidUUID(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: items with history: %w", err)
+	}
+	defer rows.Close()
+
+	refs := []ItemRef{}
+	for rows.Next() {
+		var r ItemRef
+		if err := rows.Scan(&r.ID, &r.Name); err != nil {
+			return nil, fmt.Errorf("store: scan item ref: %w", err)
+		}
+		refs = append(refs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: items with history: %w", err)
+	}
+	return refs, nil
+}
+
+// nullableID and nullableText turn an absent filter into a real SQL NULL, which is what
+// the "$n is null or ..." guards in the query test against.
+func nullableID(id string) any {
+	if id == "" {
+		return nil
+	}
+	return id
+}
+
+func nullableText(text string) any {
+	if text == "" {
+		return nil
+	}
+	return text
 }
 
 const setImagePath = `

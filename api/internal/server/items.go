@@ -207,3 +207,49 @@ func (d Deps) itemError(w http.ResponseWriter, err error, operation string) {
 	log.Printf("items: %s: %v", operation, err)
 	writeError(w, http.StatusInternalServerError, "something went wrong")
 }
+
+// maxHistoryQueryLen bounds the search box. Long enough for any item name or note anyone
+// would type, short enough that the parameter cannot be used to push work at the database.
+const maxHistoryQueryLen = 100
+
+// householdHistoryResponse is everything the history tab needs in one request: the changes
+// to show, and the items the filter can offer.
+type householdHistoryResponse struct {
+	Movements []store.HouseholdMovement `json:"movements"`
+	// Items is the set the filter can narrow to, which is the items that have a history
+	// rather than the items currently in stock.
+	Items []store.ItemRef `json:"items"`
+}
+
+// listHouseholdMovements answers the household-wide history: recent changes across every
+// item, newest first, optionally narrowed to one item or to a search term.
+func (d Deps) listHouseholdMovements(w http.ResponseWriter, r *http.Request, user store.User) {
+	householdID := r.PathValue("householdId")
+
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	// Counted in runes: a Thai search term is three bytes per character.
+	if utf8.RuneCountInString(query) > maxHistoryQueryLen {
+		writeError(w, http.StatusBadRequest, "search text is too long")
+		return
+	}
+
+	movements, err := d.Items.MovementsForHousehold(r.Context(), householdID, user.ID, store.MovementFilter{
+		ItemID: r.URL.Query().Get("itemId"),
+		Query:  query,
+		Limit:  store.HouseholdHistoryLimit,
+	})
+	if err != nil {
+		d.itemError(w, err, "household movements")
+		return
+	}
+
+	// The filter list is deliberately not narrowed by the current search: it is how the
+	// user changes the search, so it has to stay the same set to choose from.
+	items, err := d.Items.ItemsWithHistory(r.Context(), householdID, user.ID)
+	if err != nil {
+		d.itemError(w, err, "items with history")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, householdHistoryResponse{Movements: movements, Items: items})
+}

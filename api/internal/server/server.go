@@ -52,6 +52,8 @@ type Items interface {
 	UpdateItem(ctx context.Context, itemID, userID string, in store.ItemInput) (store.Item, error)
 	DeleteItem(ctx context.Context, itemID, userID string) error
 	MovementsForItem(ctx context.Context, itemID, userID string) ([]store.Movement, error)
+	MovementsForHousehold(ctx context.Context, householdID, userID string, filter store.MovementFilter) ([]store.HouseholdMovement, error)
+	ItemsWithHistory(ctx context.Context, householdID, userID string) ([]store.ItemRef, error)
 	ItemAccessible(ctx context.Context, itemID, userID string) error
 	SetItemImage(ctx context.Context, itemID, userID, path string) (store.Item, error)
 	ItemImagePath(ctx context.Context, itemID, userID string) (string, error)
@@ -98,6 +100,7 @@ func New(deps Deps) http.Handler {
 	mux.HandleFunc("PUT /api/items/{itemId}", deps.requireUser(deps.updateItem))
 	mux.HandleFunc("DELETE /api/items/{itemId}", deps.requireUser(deps.deleteItem))
 	mux.HandleFunc("GET /api/items/{itemId}/movements", deps.requireUser(deps.listMovements))
+	mux.HandleFunc("GET /api/households/{householdId}/movements", deps.requireUser(deps.listHouseholdMovements))
 	mux.HandleFunc("POST /api/items/{itemId}/image", deps.requireUser(deps.requestImageUpload))
 	mux.HandleFunc("PUT /api/items/{itemId}/image", deps.requireUser(deps.confirmImageUpload))
 	mux.HandleFunc("GET /api/items/{itemId}/image", deps.requireUser(deps.serveImage))
