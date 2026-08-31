@@ -62,3 +62,23 @@ Android crops a maskable icon to its own shape and anything outside the centre c
 - **The LIFF path still works unchanged.** Opening from LINE and opening from the home
   screen both land on the same origin, and the session cookie is checked before LIFF is
   touched, so an installed shortcut with a valid cookie opens straight into the app.
+- **An installed app has to be told when it is out of date.** Serving the shell uncached
+  is necessary but not sufficient, because it only helps on a load that actually happens.
+  A home-screen app is *suspended and resumed*, not closed and reopened, so a resumed page
+  keeps running the JavaScript it already has and never re-requests `index.html`. The build
+  therefore stamps an id into both the bundle and an uncached `version.json`, and the app
+  compares them when it becomes visible, when it is restored from the back/forward cache,
+  when the network returns, and on a slow interval. A difference means a newer build, and
+  it reloads itself.
+
+  Two guards on that reload are not optional. It is suppressed while a dialog is open,
+  because every dialog in this app holds unsaved input and losing a half-typed item is
+  worse than running yesterday's build for another few minutes. And it is suppressed if
+  another reload happened within the last minute, because a stale shell served alongside a
+  fresh `version.json` would otherwise reload in a tight loop on someone's phone. Both
+  guards only delay: verified that the reload lands on the next trigger once the dialog
+  closes and once the window passes.
+- **The home-screen *icon* is a different matter and cannot be fixed from here.** The
+  operating system copies it into the shortcut when it is created, so changing the icon on
+  the server does nothing for a shortcut that already exists — everyone would have to
+  remove it and add it again. Treat the icon as effectively immutable once shipped.

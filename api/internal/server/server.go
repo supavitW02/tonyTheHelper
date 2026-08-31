@@ -251,7 +251,9 @@ func cacheControl(name string) string {
 	// a bundle that is gone and renders nothing — and the person using this app cannot
 	// be talked through a hard refresh. Same for the worker, which decides what else
 	// gets cached.
-	case name == "index.html", name == "sw.js":
+	// version.json joins them: it is how a running app finds out a newer build exists,
+	// so a cached copy would answer with the build the user is already on.
+	case name == "index.html", name == "sw.js", name == "version.json":
 		return "no-cache"
 
 	// Icons and the manifest also keep stable names, but a stale one is cosmetic rather
