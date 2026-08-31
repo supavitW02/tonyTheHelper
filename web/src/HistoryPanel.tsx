@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { getHouseholdHistory, type Household, type HouseholdMovement, type ItemRef } from './api'
+import { formatWhen } from './formatWhen'
 import QuantityDiff from './QuantityDiff'
 import { inputClass, linkActionClass, Notice, primaryButtonClass } from './ui'
 
@@ -146,18 +147,23 @@ export default function HistoryPanel({ household, active }: { household: Househo
           <ul aria-label="ประวัติของใช้" className="flex flex-col gap-3">
             {movements.map((m) => (
               <li key={m.id} className="flex flex-col gap-1 rounded-xl border-2 border-brand-200 p-4">
-                <span className="break-words">
-                  <strong className="font-medium">{m.itemName}</strong>{' '}
+                {/* Same shape as a single item's history, with the item as the headline
+                    because that is what someone scans this list for. The timestamp sits
+                    at the far end rather than crowded against a name by a middot. */}
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                  <strong className="font-medium break-words">{m.itemName}</strong>
+                  <span className="whitespace-nowrap text-slate-600">{formatWhen(m.createdAt)}</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-2">
+                  <QuantityDiff before={m.quantityBefore} after={m.quantityAfter} />
                   <span className="whitespace-nowrap">
                     {m.quantityBefore} → {m.quantityAfter} {m.unit}
-                  </span>{' '}
-                  <QuantityDiff before={m.quantityBefore} after={m.quantityAfter} />
+                  </span>
+                </div>
+                <span className="break-words text-slate-600">
+                  {m.actorName}
+                  {m.note && ` · “${m.note}”`}
                 </span>
-                <span className="text-slate-600">
-                  {m.actorName} ·{' '}
-                  {new Date(m.createdAt).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}
-                </span>
-                {m.note && <span className="break-words text-slate-600">“{m.note}”</span>}
               </li>
             ))}
           </ul>
