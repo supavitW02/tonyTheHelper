@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { createInvite, getMembers, removeMember, type Household, type Member } from './api'
-import { dangerButtonClass, Notice, primaryButtonClass, secondaryButtonClass } from './ui'
+import { Avatar, dangerButtonClass, Notice, primaryButtonClass, secondaryButtonClass } from './ui'
 
 /**
  * Who is in the household, and — for the owner — how to change that.
@@ -86,21 +86,7 @@ export default function MembersPanel({
           {members.map((m) => (
             <li key={m.userId} className="flex flex-col gap-2 rounded-xl border-2 border-brand-200 p-4">
               <div className="flex items-center gap-3">
-                {m.pictureUrl ? (
-                  <img
-                    src={m.pictureUrl}
-                    alt=""
-                    className="size-12 shrink-0 rounded-full object-cover"
-                    referrerPolicy="no-referrer"
-                  />
-                ) : (
-                  <span
-                    aria-hidden="true"
-                    className="flex size-12 shrink-0 items-center justify-center rounded-full bg-brand-100 text-xl"
-                  >
-                    👤
-                  </span>
-                )}
+                <Avatar src={m.pictureUrl} className="size-12 text-xl" />
                 <span className="min-w-0 flex-1 break-words">
                   {m.displayName}
                   {m.isOwner && <span className="text-slate-600"> · เจ้าของบ้าน</span>}

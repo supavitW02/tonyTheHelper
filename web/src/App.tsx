@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 
 import { acceptInvite, ApiError, getHouseholds, selectHousehold, type Household, type User } from './api'
-import CreateHousehold from './CreateHousehold'
+import CreateHousehold, { CreateHouseholdDialog } from './CreateHousehold'
 import HouseholdScreen from './HouseholdScreen'
 import { resolveUser } from './signIn'
-import { inputClass, linkActionClass, Notice, primaryButtonClass } from './ui'
+import { inputClass, Notice, primaryButtonClass, secondaryButtonClass } from './ui'
 
 type State =
   | { status: 'loading' }
@@ -119,25 +119,37 @@ export default function App() {
         />
       )}
 
-      {/* The switcher only exists for someone who belongs to more than one household.
-          Everyone else must never see that this feature is there. */}
-      {state.status === 'ready' && state.households.length > 1 && (
-        <div className="flex flex-col gap-2">
-          <label htmlFor="household-switch" className="font-medium">
-            บ้าน
-          </label>
-          <select
-            id="household-switch"
-            value={state.currentId}
-            onChange={(e) => void switchTo(e.target.value)}
-            className={inputClass}
+      {state.status === 'ready' && (
+        <div className="flex items-end gap-3">
+          {/* The switcher only exists for someone who belongs to more than one household:
+              with a single one there is nothing to switch to, and an empty picker would
+              only be a question the user has to work out the answer to. */}
+          {state.households.length > 1 && (
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <label htmlFor="household-switch" className="font-medium">
+                บ้าน
+              </label>
+              <select
+                id="household-switch"
+                value={state.currentId}
+                onChange={(e) => void switchTo(e.target.value)}
+                className={inputClass}
+              >
+                {state.households.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setCreatingAnother(true)}
+            className={`${secondaryButtonClass} shrink-0 whitespace-nowrap`}
           >
-            {state.households.map((h) => (
-              <option key={h.id} value={h.id}>
-                {h.name}
-              </option>
-            ))}
-          </select>
+            + บ้านใหม่
+          </button>
         </div>
       )}
 
@@ -147,28 +159,19 @@ export default function App() {
         <HouseholdScreen key={current.id} household={current} user={state.user} onRenamed={applyRename} />
       )}
 
-      {state.status === 'ready' &&
-        (creatingAnother ? (
-          <CreateHousehold
-            onCancel={() => setCreatingAnother(false)}
-            onCreated={(household) => {
-              setCreatingAnother(false)
-              setState({
-                ...state,
-                households: [...state.households, household],
-                currentId: household.id,
-              })
-            }}
-          />
-        ) : (
-          <button
-            type="button"
-            onClick={() => setCreatingAnother(true)}
-            className={`${linkActionClass} self-start`}
-          >
-            สร้างบ้านใหม่
-          </button>
-        ))}
+      {state.status === 'ready' && creatingAnother && (
+        <CreateHouseholdDialog
+          onCancel={() => setCreatingAnother(false)}
+          onCreated={(household) => {
+            setCreatingAnother(false)
+            setState({
+              ...state,
+              households: [...state.households, household],
+              currentId: household.id,
+            })
+          }}
+        />
+      )}
 
       {state.status === 'failed' && (
         <section className="flex flex-col gap-4">

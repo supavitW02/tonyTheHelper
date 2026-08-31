@@ -29,6 +29,7 @@ func assets() fstest.MapFS {
 		"index.html":           {Data: []byte("<!doctype html><title>Tony The Helper</title>")},
 		"assets/app-abc123.js": {Data: []byte("console.log('app')")},
 		"manifest.webmanifest": {Data: []byte(`{"name":"Tony The Helper"}`)},
+		"sw.js":                {Data: []byte("/* service worker */")},
 	}
 }
 
@@ -1936,5 +1937,62 @@ func TestManifestIsServedAsAManifest(t *testing.T) {
 	}
 	if got := res.Header.Get("Content-Type"); !strings.Contains(got, "application/manifest+json") {
 		t.Errorf("Content-Type = %q, want it to contain application/manifest+json", got)
+	}
+}
+
+// --- caching ---------------------------------------------------------------------
+
+// Build output carries a content hash in its filename, so a given URL can never change
+// meaning. Serving it immutable is what lets a repeat open skip the whole bundle.
+func TestBuiltAssetsAreCachedForever(t *testing.T) {
+	res := newHarness(t).get("/assets/app-abc123.js")
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	got := res.Header.Get("Cache-Control")
+	for _, want := range []string{"max-age=31536000", "immutable"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Cache-Control = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+// The shell is the one file that must always be revalidated. A deploy replaces the hashed
+// asset filenames and the old ones stop existing, so a browser left holding a stale shell
+// would ask for a bundle that is gone and render nothing at all.
+func TestTheAppShellIsAlwaysRevalidated(t *testing.T) {
+	for _, path := range []string{"/", "/some/client/route"} {
+		res := newHarness(t).get(path)
+
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status = %d, want %d", path, res.StatusCode, http.StatusOK)
+		}
+		if got := res.Header.Get("Cache-Control"); !strings.Contains(got, "no-cache") {
+			t.Errorf("%s: Cache-Control = %q, want it to contain no-cache", path, got)
+		}
+	}
+}
+
+// index.html is reachable by its own name as well as by the fallback, and it must not be
+// cacheable by that route either.
+func TestTheShellIsNotCacheableUnderItsOwnName(t *testing.T) {
+	res := newHarness(t).get("/index.html")
+
+	if got := res.Header.Get("Cache-Control"); !strings.Contains(got, "no-cache") {
+		t.Errorf("Cache-Control = %q, want it to contain no-cache", got)
+	}
+}
+
+// The service worker decides what the browser caches, so a stale copy of it is the one
+// that could pin someone to old behaviour with no way out.
+func TestTheServiceWorkerIsAlwaysRevalidated(t *testing.T) {
+	res := newHarness(t).get("/sw.js")
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	if got := res.Header.Get("Cache-Control"); !strings.Contains(got, "no-cache") {
+		t.Errorf("Cache-Control = %q, want it to contain no-cache", got)
 	}
 }
