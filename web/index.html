@@ -13,7 +13,25 @@
     <title>ของใช้ในบ้าน</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- Shown until React mounts and replaces it. Without this there is a blank white
+           gap while the bundle downloads — on a cold machine that is the first thing the
+           user sees, and blank reads as "the app is broken" rather than "it is loading".
+           Inline styles on purpose: this must not wait for the stylesheet. -->
+      <p
+        style="
+          margin: 0;
+          min-height: 100dvh;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #475569;
+          font-family: 'IBM Plex Sans Thai', 'Noto Sans Thai', sans-serif;
+        "
+      >
+        กำลังเปิดของใช้ในบ้าน…
+      </p>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
