@@ -64,11 +64,12 @@ func run() error {
 	srv := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: server.New(server.Deps{
-			Assets:   assets,
-			LiffID:   cfg.LiffID,
-			Verifier: line.NewVerifier(cfg.LineChannelID),
-			Users:    db,
-			Sessions: session.NewManager(cfg.SessionSecret),
+			Assets:     assets,
+			LiffID:     cfg.LiffID,
+			Verifier:   line.NewVerifier(cfg.LineChannelID),
+			Users:      db,
+			Households: db,
+			Sessions:   session.NewManager(cfg.SessionSecret),
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

@@ -46,3 +46,24 @@ export const signIn = (idToken: string) =>
     method: 'POST',
     body: JSON.stringify({ idToken }),
   })
+
+/** A group of people who share one stock of items. */
+export type Household = {
+  id: string
+  name: string
+  /** Only the owner manages who is in the household. */
+  isOwner: boolean
+}
+
+/**
+ * The households the signed-in user belongs to, and which one to open.
+ * An empty `currentId` means they belong to none yet.
+ */
+export const getHouseholds = () => request<{ households: Household[]; currentId: string }>('/api/households')
+
+/** Creates a household with the caller as its owner and first member. */
+export const createHousehold = (name: string) =>
+  request<Household>('/api/households', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  })
