@@ -11,6 +11,7 @@ import {
   type User,
 } from './api'
 import AddItemForm from './AddItemForm'
+import DeleteHousehold from './DeleteHousehold'
 import HistoryPanel from './HistoryPanel'
 import ItemRow from './ItemRow'
 import MembersPanel from './MembersPanel'
@@ -46,10 +47,12 @@ export default function HouseholdScreen({
   household,
   user,
   onRenamed,
+  onDeleted,
 }: {
   household: Household
   user: User
   onRenamed: (household: Household) => void
+  onDeleted: (householdId: string) => void
 }) {
   const [tab, setTab] = useState<Tab>('items')
   const [items, setItems] = useState<Item[] | null>(null)
@@ -230,7 +233,15 @@ export default function HouseholdScreen({
       {/* Every panel stays mounted so the tabs' aria-controls always point at something
           real, but each only fetches once its tab has actually been opened. */}
       <div role="tabpanel" id="panel-members" aria-labelledby="tab-members" hidden={tab !== 'members'}>
-        <MembersPanel household={household} meId={user.id} active={tab === 'members'} />
+        <div className="flex flex-col gap-8">
+          <MembersPanel household={household} meId={user.id} active={tab === 'members'} />
+          {/* Last on the tab, and owner-only. Rendered here rather than inside
+              MembersPanel because the confirmation needs the real item count, and that
+              list is not the member panel's business. */}
+          {household.isOwner && (
+            <DeleteHousehold household={household} itemCount={items?.length ?? 0} onDeleted={onDeleted} />
+          )}
+        </div>
       </div>
 
       <div role="tabpanel" id="panel-history" aria-labelledby="tab-history" hidden={tab !== 'history'}>

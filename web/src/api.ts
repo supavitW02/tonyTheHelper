@@ -77,6 +77,17 @@ export const renameHousehold = (householdId: string, name: string) =>
     body: JSON.stringify({ name }),
   })
 
+/**
+ * Makes a household inaccessible to everyone in it. Owner only.
+ *
+ * The items and their history are not erased, only unreachable — the movement log is
+ * append-only (ADR-0001). From the app's side there is no way back.
+ */
+export const deleteHousehold = async (householdId: string): Promise<void> => {
+  const res = await fetch(`/api/households/${householdId}`, { method: 'DELETE' })
+  if (!res.ok) throw new ApiError(res.status, 'could not delete the household')
+}
+
 /** A kind of thing a household keeps in stock. */
 export type Item = {
   id: string

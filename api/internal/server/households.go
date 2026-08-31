@@ -127,3 +127,15 @@ func (d Deps) renameHousehold(w http.ResponseWriter, r *http.Request, user store
 
 	writeJSON(w, http.StatusOK, household)
 }
+
+// deleteHousehold makes a household inaccessible to everyone in it. Owner only.
+//
+// The history is not erased, only unreachable (ADR-0001). That is deliberate, and it is
+// why this returns no content rather than anything describing what was removed.
+func (d Deps) deleteHousehold(w http.ResponseWriter, r *http.Request, user store.User) {
+	if err := d.Households.DeleteHousehold(r.Context(), r.PathValue("householdId"), user.ID); err != nil {
+		d.householdError(w, err, "delete household")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

@@ -138,6 +138,37 @@ func (f *fakeHouseholds) RenameHousehold(_ context.Context, householdID, ownerID
 	return store.Household{ID: householdID, Name: name, OwnerID: ownerID, IsOwner: true}, nil
 }
 
+func (f *fakeHouseholds) DeleteHousehold(_ context.Context, householdID, ownerID string) error {
+	if f.err != nil {
+		return f.err
+	}
+	if err := f.requireOwner(householdID, ownerID); err != nil {
+		return err
+	}
+
+	// Mirrors the real store: access is revoked by dropping memberships, not by a flag.
+	// A second delete therefore fails the ownership check with ErrNotFound, exactly as it
+	// does against the database.
+	for user := range f.byUser {
+		kept := []store.Household{}
+		for _, h := range f.byUser[user] {
+			if h.ID != householdID {
+				kept = append(kept, h)
+			}
+		}
+		f.byUser[user] = kept
+		if f.last[user] == householdID {
+			delete(f.last, user)
+		}
+	}
+	for token, invite := range f.invites {
+		if invite.householdID == householdID {
+			delete(f.invites, token)
+		}
+	}
+	return nil
+}
+
 func (f *fakeHouseholds) HouseholdsForUser(_ context.Context, userID string) ([]store.Household, error) {
 	if f.err != nil {
 		return nil, f.err
@@ -1046,6 +1077,7 @@ func TestHouseholdEndpointsRequireASession(t *testing.T) {
 		{http.MethodGet, "/api/households", ""},
 		{http.MethodPost, "/api/households", `{"name":"บ้านเรา"}`},
 		{http.MethodPatch, "/api/households/household-1", `{"name":"บ้านเรา"}`},
+		{http.MethodDelete, "/api/households/household-1", ""},
 	}
 	for _, c := range cases {
 		var req *http.Request
@@ -2373,5 +2405,119 @@ func TestAnItemCanCarryBothAnIconAndAPhoto(t *testing.T) {
 	}
 	if confirmed.Icon != "🧴" {
 		t.Errorf("Icon = %q, want the icon kept alongside the photo", confirmed.Icon)
+	}
+}
+
+// --- deleting a household ---------------------------------------------------------
+
+func TestTheOwnerCanDeleteAHousehold(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+
+	res := h.signedIn(t, http.MethodDelete, "/api/households/"+id, "")
+
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body = %s", res.StatusCode, http.StatusNoContent, body(t, res))
+	}
+	listed := decodeHouseholds(t, h.signedIn(t, http.MethodGet, "/api/households", ""))
+	if len(listed.Households) != 0 {
+		t.Errorf("owner still sees %+v", listed.Households)
+	}
+	if listed.CurrentID != "" {
+		t.Errorf("currentId = %q, want empty so the app asks them to create one", listed.CurrentID)
+	}
+}
+
+func TestDeletingAHouseholdTakesItAwayFromItsMembersToo(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+	token, _ := h.inviteToken(t, id)
+	mum := h.asUser(t, "user-mum-del", "แม่")
+	if res := h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", ""); res.StatusCode != http.StatusOK {
+		t.Fatalf("accept: status = %d", res.StatusCode)
+	}
+
+	h.signedIn(t, http.MethodDelete, "/api/households/"+id, "")
+
+	listed := decodeHouseholds(t, h.doAs(t, mum, http.MethodGet, "/api/households", ""))
+	if len(listed.Households) != 0 {
+		t.Errorf("the member still sees %+v", listed.Households)
+	}
+	// The endpoints that enforce membership are closed to them outright.
+	for _, path := range []string{"/movements", "/members"} {
+		if res := h.doAs(t, mum, http.MethodGet, "/api/households/"+id+path, ""); res.StatusCode != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want %d", path, res.StatusCode, http.StatusNotFound)
+		}
+	}
+
+	// Listing items answers 200 with nothing in it rather than 404, which is how it has
+	// always answered for a household you do not belong to — the membership join simply
+	// yields no rows. Either way there is no content to see, and the response is identical
+	// whether or not the household ever existed.
+	items := decodeItems(t, h.doAs(t, mum, http.MethodGet, "/api/households/"+id+"/items", ""))
+	if len(items.Items) != 0 {
+		t.Errorf("the member can still list %d items", len(items.Items))
+	}
+}
+
+func TestAMemberCannotDeleteTheHousehold(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+	token, _ := h.inviteToken(t, id)
+	mum := h.asUser(t, "user-mum-nodel", "แม่")
+	if res := h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", ""); res.StatusCode != http.StatusOK {
+		t.Fatalf("accept: status = %d", res.StatusCode)
+	}
+
+	res := h.doAs(t, mum, http.MethodDelete, "/api/households/"+id, "")
+
+	if res.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d; body = %s", res.StatusCode, http.StatusForbidden, body(t, res))
+	}
+	listed := decodeHouseholds(t, h.signedIn(t, http.MethodGet, "/api/households", ""))
+	if len(listed.Households) != 1 {
+		t.Errorf("owner sees %d households, want 1", len(listed.Households))
+	}
+}
+
+func TestAnOutsiderDeletingAHouseholdLearnsNothing(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+	stranger := h.asUser(t, "user-stranger-del", "คนแปลกหน้า")
+
+	res := h.doAs(t, stranger, http.MethodDelete, "/api/households/"+id, "")
+
+	// 404, not 403: a stranger must not learn the household is there to be deleted.
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestDeletingAHouseholdTwiceOverHTTPIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+
+	if res := h.signedIn(t, http.MethodDelete, "/api/households/"+id, ""); res.StatusCode != http.StatusNoContent {
+		t.Fatalf("first delete: status = %d", res.StatusCode)
+	}
+	if res := h.signedIn(t, http.MethodDelete, "/api/households/"+id, ""); res.StatusCode != http.StatusNotFound {
+		t.Errorf("second delete: status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestDeletingOneHouseholdLeavesTheOthersOverHTTP(t *testing.T) {
+	h := newHarness(t)
+	keep := h.withHousehold(t)
+	var drop store.Household
+	if err := json.Unmarshal([]byte(body(t, h.signedIn(t, http.MethodPost, "/api/households",
+		`{"name":"บ้านที่จะลบ"}`))), &drop); err != nil {
+		t.Fatalf("decode household: %v", err)
+	}
+
+	h.signedIn(t, http.MethodDelete, "/api/households/"+drop.ID, "")
+
+	listed := decodeHouseholds(t, h.signedIn(t, http.MethodGet, "/api/households", ""))
+	if len(listed.Households) != 1 || listed.Households[0].ID != keep {
+		t.Errorf("remaining = %+v, want just %q", listed.Households, keep)
 	}
 }

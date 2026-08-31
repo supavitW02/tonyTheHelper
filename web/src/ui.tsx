@@ -132,10 +132,20 @@ export function Notice({ tone = 'error', children }: { tone?: 'error' | 'info'; 
 export function Dialog({
   title,
   onClose,
+  initialFocus,
   children,
 }: {
   title: string
   onClose: () => void
+  /**
+   * What should hold focus when the dialog opens, instead of the first focusable element.
+   *
+   * Needed for a destructive dialog, where the first thing in the DOM is the button you
+   * do not want a stray Enter to press. Note that React's `autoFocus` cannot do this
+   * job: React implements it by calling focus() during commit, and `showModal()` runs
+   * after that and moves focus to the first focusable element regardless.
+   */
+  initialFocus?: React.RefObject<HTMLElement | null>
   children: React.ReactNode
 }) {
   const ref = useRef<HTMLDialogElement>(null)
@@ -145,10 +155,11 @@ export function Dialog({
     const el = ref.current
     if (!el) return
     el.showModal()
+    initialFocus?.current?.focus()
     return () => {
       el.close()
     }
-  }, [])
+  }, [initialFocus])
 
   return (
     <dialog
