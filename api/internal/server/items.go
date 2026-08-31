@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/supavitW02/tonyTheHelper/api/internal/store"
@@ -18,6 +19,11 @@ const (
 	maxUnitLen        = 30
 	maxDescriptionLen = 500
 	maxNoteLen        = 300
+
+	// maxIconLen bounds an icon in runes, and is not 1 on purpose: a single emoji can
+	// legitimately be several code points — a skin-tone modifier, a variation selector,
+	// a zero-width joiner between two symbols.
+	maxIconLen = 8
 
 	// Bounds on a single adjustment. Generous for a household, tight enough that a
 	// runaway client cannot write an absurd number into the column.
@@ -58,6 +64,30 @@ type itemRequest struct {
 	// Absent or null means the item is never low. Pointer so that 0 — "low as soon as
 	// any is used" — is distinguishable from "not set".
 	LowStockThreshold *int `json:"lowStockThreshold"`
+	// Icon is a symbol standing in for a photo. Empty clears it.
+	Icon string `json:"icon"`
+}
+
+// iconProblem guards the shape of an icon rather than checking it against a list of
+// permitted symbols.
+//
+// Which icons are offered is a question about the picker, so that list lives in one
+// place — the frontend — and adding one needs no deploy here. What this does insist on is
+// that an icon is a symbol and not a label: short, no whitespace, and nothing from ASCII,
+// which is what stops someone storing "ABC" as their item's picture.
+func iconProblem(icon string) string {
+	if icon == "" {
+		return ""
+	}
+	if utf8.RuneCountInString(icon) > maxIconLen {
+		return "icon is too long"
+	}
+	for _, r := range icon {
+		if r < utf8.RuneSelf || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return "icon must be a symbol"
+		}
+	}
+	return ""
 }
 
 // validate returns a user-facing reason the input is unacceptable, or an empty string.
@@ -76,7 +106,7 @@ func (in itemRequest) validate() string {
 	case in.LowStockThreshold != nil && (*in.LowStockThreshold < 0 || *in.LowStockThreshold > maxQuantity):
 		return "low stock threshold is out of range"
 	}
-	return ""
+	return iconProblem(strings.TrimSpace(in.Icon))
 }
 
 func (in itemRequest) toInput() store.ItemInput {
@@ -85,6 +115,7 @@ func (in itemRequest) toInput() store.ItemInput {
 		Unit:              strings.TrimSpace(in.Unit),
 		Description:       strings.TrimSpace(in.Description),
 		LowStockThreshold: in.LowStockThreshold,
+		Icon:              strings.TrimSpace(in.Icon),
 	}
 }
 

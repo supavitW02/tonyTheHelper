@@ -307,6 +307,9 @@ type Item struct {
 	// HasImage rather than the path itself: where an item's photo lives in object
 	// storage is not the browser's business, and the URL is minted per request anyway.
 	HasImage bool `json:"hasImage"`
+	// Icon is a symbol chosen from a list instead of a photograph. It is a fallback, not
+	// an alternative: an item with a photo shows the photo.
+	Icon string `json:"icon,omitempty"`
 }
 
 // ItemInput is the writable half of an item, shared by create and update.
@@ -315,6 +318,8 @@ type ItemInput struct {
 	Unit              string
 	Description       string
 	LowStockThreshold *int
+	// Icon is empty for "no icon", which is also how an existing one is cleared.
+	Icon string
 }
 
 // Movement is one recorded change to an item's quantity, with the person who made it.
@@ -332,15 +337,17 @@ type Movement struct {
 const itemColumns = `i.id, i.name, i.unit, coalesce(i.description, ''), i.quantity,
 	i.low_stock_threshold,
 	(i.low_stock_threshold is not null and i.quantity <= i.low_stock_threshold) as is_low,
-	(i.image_path is not null) as has_image`
+	(i.image_path is not null) as has_image,
+	coalesce(i.icon, '')`
 
+// Aliased as i so the RETURNING clause can share itemColumns. The projection used to be
+// spelled out separately in three places, which is how a newly added column gets missed
+// on one read path and not the others.
 const insertItem = `
-insert into items (household_id, name, unit, description, low_stock_threshold, created_by)
-select $1, $2, $3, nullif($4, ''), $5, $6
+insert into items as i (household_id, name, unit, description, low_stock_threshold, created_by, icon)
+select $1, $2, $3, nullif($4, ''), $5, $6, nullif($7, '')
 where exists (select 1 from household_members where household_id = $1 and user_id = $6)
-returning id, name, unit, coalesce(description, ''), quantity, low_stock_threshold,
-          (low_stock_threshold is not null and quantity <= low_stock_threshold) as is_low,
-          (image_path is not null) as has_image`
+returning ` + itemColumns
 
 // CreateItem adds an item to a household.
 //
@@ -351,8 +358,8 @@ returning id, name, unit, coalesce(description, ''), quantity, low_stock_thresho
 func (db *DB) CreateItem(ctx context.Context, householdID, userID string, in ItemInput) (Item, error) {
 	var i Item
 	err := db.pool.QueryRow(ctx, insertItem,
-		householdID, in.Name, in.Unit, in.Description, in.LowStockThreshold, userID).
-		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage)
+		householdID, in.Name, in.Unit, in.Description, in.LowStockThreshold, userID, in.Icon).
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage, &i.Icon)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -389,7 +396,7 @@ func (db *DB) ItemsForHousehold(ctx context.Context, householdID, userID string)
 	for rows.Next() {
 		var i Item
 		if err := rows.Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity,
-			&i.LowStockThreshold, &i.IsLow, &i.HasImage); err != nil {
+			&i.LowStockThreshold, &i.IsLow, &i.HasImage, &i.Icon); err != nil {
 			return nil, fmt.Errorf("store: scan item: %w", err)
 		}
 		items = append(items, i)
@@ -444,7 +451,7 @@ type QuantityChange struct {
 
 const lockItemForUpdate = `
 select i.quantity, i.name, i.unit, coalesce(i.description, ''), i.low_stock_threshold,
-       (i.image_path is not null) as has_image
+       (i.image_path is not null) as has_image, coalesce(i.icon, '')
 from items i
 join household_members m on m.household_id = i.household_id and m.user_id = $2
 where i.id = $1 and i.deleted_at is null
@@ -475,7 +482,8 @@ func (db *DB) AdjustQuantity(ctx context.Context, itemID, userID string, change 
 	var before int
 	item := Item{ID: itemID}
 	err = tx.QueryRow(ctx, lockItemForUpdate, itemID, userID).
-		Scan(&before, &item.Name, &item.Unit, &item.Description, &item.LowStockThreshold, &item.HasImage)
+		Scan(&before, &item.Name, &item.Unit, &item.Description, &item.LowStockThreshold,
+			&item.HasImage, &item.Icon)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -534,21 +542,20 @@ func targetQuantity(before int, change QuantityChange) int {
 
 const updateItemFields = `
 update items i
-set name = $3, unit = $4, description = nullif($5, ''), low_stock_threshold = $6, updated_at = now()
+set name = $3, unit = $4, description = nullif($5, ''), low_stock_threshold = $6,
+    icon = nullif($7, ''), updated_at = now()
 where i.id = $1
   and i.deleted_at is null
   and exists (select 1 from household_members m where m.household_id = i.household_id and m.user_id = $2)
-returning i.id, i.name, i.unit, coalesce(i.description, ''), i.quantity, i.low_stock_threshold,
-          (i.low_stock_threshold is not null and i.quantity <= i.low_stock_threshold) as is_low,
-          (i.image_path is not null) as has_image`
+returning ` + itemColumns
 
 // UpdateItem changes an item's editable fields. It deliberately cannot touch quantity:
 // that only ever moves through AdjustQuantity, so every change is recorded (ADR-0001).
 func (db *DB) UpdateItem(ctx context.Context, itemID, userID string, in ItemInput) (Item, error) {
 	var i Item
 	err := db.pool.QueryRow(ctx, updateItemFields,
-		itemID, userID, in.Name, in.Unit, in.Description, in.LowStockThreshold).
-		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage)
+		itemID, userID, in.Name, in.Unit, in.Description, in.LowStockThreshold, in.Icon).
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage, &i.Icon)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -810,7 +817,7 @@ returning ` + itemColumns
 func (db *DB) SetItemImage(ctx context.Context, itemID, userID, path string) (Item, error) {
 	var i Item
 	err := db.pool.QueryRow(ctx, setImagePath, itemID, userID, path).
-		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage)
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage, &i.Icon)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):

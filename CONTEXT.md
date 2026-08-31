@@ -36,6 +36,13 @@ An item is a *kind* of thing ("น้ำปลา"), not a single physical objec
 _Thai_: ของ
 _Avoid_: product, SKU, goods, stock, thing
 
+**Icon**:
+A symbol chosen from a fixed list to stand in for an item's photo. A fallback, not an
+alternative: an item with a photo shows the photo. The point is that giving an item a
+picture should not require a camera.
+_Thai_: ไอคอน
+_Avoid_: emoji (an implementation detail), avatar, image, thumbnail
+
 **Unit**:
 What is being counted for an item.
 _Thai_: หน่วยนับ

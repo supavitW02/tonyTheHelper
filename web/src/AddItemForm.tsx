@@ -1,6 +1,7 @@
 import { useState } from 'react'
 
 import { createItem, type Item } from './api'
+import IconPicker from './IconPicker'
 import { Dialog, Field, inputClass, Notice, primaryButtonClass, secondaryButtonClass } from './ui'
 
 /**
@@ -30,6 +31,7 @@ export default function AddItemForm({
   const [unit, setUnit] = useState('')
   const [description, setDescription] = useState('')
   const [threshold, setThreshold] = useState('')
+  const [icon, setIcon] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -49,6 +51,7 @@ export default function AddItemForm({
           description: description.trim() || undefined,
           // Empty means "never warn me", which the API expects as null.
           lowStockThreshold: threshold.trim() === '' ? null : Number(threshold),
+          icon,
         }),
       )
     } catch (err) {
@@ -128,6 +131,8 @@ export default function AddItemForm({
             className={inputClass}
           />
         </Field>
+
+        <IconPicker value={icon} onChange={setIcon} />
 
         {error && <Notice>{error}</Notice>}
 
