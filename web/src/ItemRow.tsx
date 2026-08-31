@@ -2,14 +2,15 @@ import { useEffect, useState } from 'react'
 
 import { getMovements, itemImageUrl, type Item, type ItemInput, type Movement } from './api'
 
-type Panel = null | 'total' | 'history' | 'edit'
+type Panel = null | 'total' | 'history' | 'edit' | 'photo'
 
 /**
  * One item in the household list.
  *
- * The everyday action is "we used one", so minus and plus are large, always visible and
- * need no keyboard. Everything else — setting a total, reading the history, editing or
- * deleting — is one tap further in, so the common case stays uncluttered.
+ * Laid out in stacked rows rather than one horizontal strip. At the app's 125% root font
+ * size a phone gives about 340px of content width, and a thumbnail plus two 56px buttons
+ * plus the name does not fit on one line — the name truncated and the "ใกล้หมด" badge
+ * collided with the minus button. Each row now owns its full width.
  */
 export default function ItemRow({
   item,
@@ -30,27 +31,32 @@ export default function ItemRow({
   const toggle = (next: Exclude<Panel, null>) => setPanel((open) => (open === next ? null : next))
 
   return (
-    <li className="flex flex-col gap-3 rounded-xl border-2 border-slate-200 p-4">
-      <div className="flex items-center gap-4">
+    <li className="flex flex-col gap-4 rounded-xl border-2 border-slate-200 p-4">
+      <div className="flex items-start gap-3">
         <Thumbnail item={item} />
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="truncate text-xl font-medium">{item.name}</span>
-          {/* Marked with a symbol and words, never colour alone. */}
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          {/* Wraps rather than truncating: reading the whole name matters more than
+              keeping every row the same height. */}
+          <span className="text-xl font-medium break-words">{item.name}</span>
           {item.isLow && (
-            <span className="flex items-center gap-1 self-start rounded-full bg-amber-100 px-3 py-1 text-amber-900">
+            <span className="flex w-fit items-center gap-1 rounded-full bg-amber-100 px-3 py-1 text-amber-900">
               <span aria-hidden="true">⚠</span> ใกล้หมด
             </span>
           )}
-          <button
-            type="button"
-            onClick={() => toggle('total')}
-            aria-expanded={panel === 'total'}
-            className="self-start text-slate-600 underline underline-offset-4"
-          >
-            {item.quantity} {item.unit}
-          </button>
         </div>
+      </div>
 
+      {/* The everyday action gets a row to itself, so both buttons keep their full size
+          and the quantity has room to breathe. */}
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => toggle('total')}
+          aria-expanded={panel === 'total'}
+          className="min-h-14 flex-1 rounded-xl bg-slate-50 px-4 text-left text-slate-700"
+        >
+          {item.quantity} {item.unit}
+        </button>
         <StepButton label={`ลด ${item.name}`} disabled={item.quantity === 0} onClick={() => onStep(-1)}>
           −
         </StepButton>
@@ -59,9 +65,13 @@ export default function ItemRow({
         </StepButton>
       </div>
 
-      <div className="flex gap-4">
+      <div className="flex flex-wrap gap-x-6 gap-y-1">
         <SmallAction onClick={() => toggle('history')} expanded={panel === 'history'}>
           ประวัติ
+        </SmallAction>
+        {/* Its own action rather than buried inside แก้ไข, where nobody found it. */}
+        <SmallAction onClick={() => toggle('photo')} expanded={panel === 'photo'}>
+          รูปภาพ
         </SmallAction>
         <SmallAction onClick={() => toggle('edit')} expanded={panel === 'edit'}>
           แก้ไข
@@ -81,6 +91,12 @@ export default function ItemRow({
 
       {panel === 'history' && <History itemId={item.id} unit={item.unit} />}
 
+      {panel === 'photo' && (
+        <Panelled>
+          <PhotoPicker item={item} onPhoto={onPhoto} />
+        </Panelled>
+      )}
+
       {panel === 'edit' && (
         <EditForm
           item={item}
@@ -90,11 +106,15 @@ export default function ItemRow({
             setPanel(null)
           }}
           onDelete={onDelete}
-          onPhoto={onPhoto}
         />
       )}
     </li>
   )
+}
+
+/** A separator above an expanded panel, so it reads as belonging to this item. */
+function Panelled({ children }: { children: React.ReactNode }) {
+  return <div className="flex flex-col gap-3 border-t-2 border-slate-100 pt-4">{children}</div>
 }
 
 /**
@@ -139,7 +159,8 @@ function StepButton({
       aria-label={label}
       disabled={disabled}
       onClick={onClick}
-      // 56px square: comfortably above the tap-target floor and reachable one-handed.
+      // size-14 is 3.5rem, and rem is 20px here, so these render at 70px square —
+      // well above the tap-target floor and easy to hit one-handed.
       className="size-14 shrink-0 rounded-xl bg-slate-900 text-3xl leading-none text-white disabled:bg-slate-200 disabled:text-slate-400"
     >
       {children}
@@ -187,7 +208,7 @@ function SetTotalForm({
   const valid = value.trim() !== '' && Number.isInteger(quantity) && quantity >= 0
 
   return (
-    <div className="flex flex-col gap-3 border-t-2 border-slate-100 pt-3">
+    <Panelled>
       <label htmlFor={`qty-${item.id}`} className="font-medium">
         แก้ไขจำนวน
       </label>
@@ -208,20 +229,18 @@ function SetTotalForm({
         placeholder="หมายเหตุ (ไม่บังคับ)"
         className={inputClass}
       />
-      <div className="flex gap-3">
-        <button
-          type="button"
-          disabled={!valid}
-          onClick={() => onSubmit(quantity, note.trim())}
-          className="min-h-14 flex-1 rounded-xl bg-slate-900 px-4 font-medium text-white disabled:bg-slate-300 disabled:text-slate-500"
-        >
-          บันทึก
-        </button>
-        <button type="button" onClick={onCancel} className="min-h-14 flex-1 rounded-xl border-2 border-slate-300 px-4">
-          ยกเลิก
-        </button>
-      </div>
-    </div>
+      <button
+        type="button"
+        disabled={!valid}
+        onClick={() => onSubmit(quantity, note.trim())}
+        className="min-h-14 rounded-xl bg-slate-900 px-4 font-medium text-white disabled:bg-slate-300 disabled:text-slate-500"
+      >
+        บันทึก
+      </button>
+      <button type="button" onClick={onCancel} className="min-h-14 rounded-xl border-2 border-slate-300 px-4">
+        ยกเลิก
+      </button>
+    </Panelled>
   )
 }
 
@@ -230,7 +249,7 @@ function History({ itemId, unit }: { itemId: string; unit: string }) {
   const [movements, setMovements] = useState<Movement[] | null>(null)
   const [failed, setFailed] = useState(false)
 
-  // Fetched in an effect, not during render: the history is loaded lazily when the panel
+  // Fetched in an effect, not during render: the history loads lazily when the panel
   // opens, and fetching in the render path would re-fire on every re-render.
   useEffect(() => {
     let cancelled = false
@@ -251,7 +270,7 @@ function History({ itemId, unit }: { itemId: string; unit: string }) {
   }, [itemId])
 
   return (
-    <div className="flex flex-col gap-3 border-t-2 border-slate-100 pt-3">
+    <Panelled>
       {failed && <p className="text-amber-900">โหลดประวัติไม่สำเร็จ</p>}
       {!failed && movements === null && <p className="text-slate-600">กำลังโหลดประวัติ…</p>}
       {movements?.length === 0 && <p className="text-slate-600">ยังไม่มีการเปลี่ยนแปลง</p>}
@@ -270,7 +289,46 @@ function History({ itemId, unit }: { itemId: string; unit: string }) {
           ))}
         </ul>
       )}
-    </div>
+    </Panelled>
+  )
+}
+
+/** Choosing a photo. accept="image/*" is what offers the camera or the gallery on a phone. */
+function PhotoPicker({ item, onPhoto }: { item: Item; onPhoto: (file: File) => Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  return (
+    <>
+      <label htmlFor={`photo-${item.id}`} className="font-medium">
+        {item.hasImage ? 'เปลี่ยนรูปภาพ' : 'เพิ่มรูปภาพ'}
+      </label>
+      <input
+        id={`photo-${item.id}`}
+        type="file"
+        accept="image/*"
+        disabled={busy}
+        onChange={async (e) => {
+          const file = e.target.files?.[0]
+          if (!file) return
+          setBusy(true)
+          setFailed(false)
+          try {
+            await onPhoto(file)
+          } catch (err) {
+            console.error('photo upload failed', err)
+            setFailed(true)
+          } finally {
+            setBusy(false)
+            // Clear the input so picking the same file again still fires a change.
+            e.target.value = ''
+          }
+        }}
+        className="w-full rounded-xl border-2 border-slate-300 p-3"
+      />
+      {busy && <p aria-live="polite" className="text-slate-600">กำลังอัปโหลดรูป…</p>}
+      {failed && <p aria-live="assertive" className="text-amber-900">อัปโหลดรูปไม่สำเร็จ กรุณาลองใหม่</p>}
+    </>
   )
 }
 
@@ -278,13 +336,11 @@ function EditForm({
   item,
   onSave,
   onDelete,
-  onPhoto,
   onCancel,
 }: {
   item: Item
   onSave: (input: ItemInput) => Promise<void>
   onDelete: () => Promise<void>
-  onPhoto: (file: File) => Promise<void>
   onCancel: () => void
 }) {
   const [name, setName] = useState(item.name)
@@ -297,7 +353,7 @@ function EditForm({
   const ready = name.trim() !== '' && unit.trim() !== '' && !busy
 
   return (
-    <div className="flex flex-col gap-3 border-t-2 border-slate-100 pt-3">
+    <Panelled>
       <label htmlFor={`name-${item.id}`} className="font-medium">
         ชื่อของ
       </label>
@@ -312,8 +368,6 @@ function EditForm({
         รายละเอียด (ไม่บังคับ)
       </label>
       <input id={`desc-${item.id}`} type="text" value={description} maxLength={500} onChange={(e) => setDescription(e.target.value)} className={inputClass} />
-
-      <PhotoPicker item={item} onPhoto={onPhoto} />
 
       <label htmlFor={`low-${item.id}`} className="font-medium">
         เตือนเมื่อเหลือน้อยกว่าหรือเท่ากับ (ไม่บังคับ)
@@ -383,45 +437,6 @@ function EditForm({
           ลบของนี้
         </button>
       )}
-    </div>
-  )
-}
-
-/** Choosing a photo. accept="image/*" is what offers the camera or the gallery on a phone. */
-function PhotoPicker({ item, onPhoto }: { item: Item; onPhoto: (file: File) => Promise<void> }) {
-  const [busy, setBusy] = useState(false)
-  const [failed, setFailed] = useState(false)
-
-  return (
-    <div className="flex flex-col gap-2">
-      <label htmlFor={`photo-${item.id}`} className="font-medium">
-        รูปภาพ (ไม่บังคับ)
-      </label>
-      <input
-        id={`photo-${item.id}`}
-        type="file"
-        accept="image/*"
-        disabled={busy}
-        onChange={async (e) => {
-          const file = e.target.files?.[0]
-          if (!file) return
-          setBusy(true)
-          setFailed(false)
-          try {
-            await onPhoto(file)
-          } catch (err) {
-            console.error('photo upload failed', err)
-            setFailed(true)
-          } finally {
-            setBusy(false)
-            // Clear the input so picking the same file again still fires a change.
-            e.target.value = ''
-          }
-        }}
-        className="min-h-14 w-full rounded-xl border-2 border-slate-300 px-4 py-3"
-      />
-      {busy && <p className="text-slate-600">กำลังอัปโหลดรูป…</p>}
-      {failed && <p className="text-amber-900">อัปโหลดรูปไม่สำเร็จ กรุณาลองใหม่</p>}
-    </div>
+    </Panelled>
   )
 }
