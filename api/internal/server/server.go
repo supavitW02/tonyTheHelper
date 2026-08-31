@@ -37,10 +37,13 @@ type Households interface {
 
 // Items persists a household's stock and the log of every change to it.
 type Items interface {
-	CreateItem(ctx context.Context, householdID, userID, name, unit, description string) (store.Item, error)
+	CreateItem(ctx context.Context, householdID, userID string, in store.ItemInput) (store.Item, error)
 	ItemsForHousehold(ctx context.Context, householdID, userID string) ([]store.Item, error)
 	UnitsForHousehold(ctx context.Context, householdID, userID string) ([]string, error)
 	AdjustQuantity(ctx context.Context, itemID, userID string, change store.QuantityChange) (store.Item, error)
+	UpdateItem(ctx context.Context, itemID, userID string, in store.ItemInput) (store.Item, error)
+	DeleteItem(ctx context.Context, itemID, userID string) error
+	MovementsForItem(ctx context.Context, itemID, userID string) ([]store.Movement, error)
 }
 
 type Deps struct {
@@ -64,6 +67,9 @@ func New(deps Deps) http.Handler {
 	mux.HandleFunc("GET /api/households/{householdId}/items", deps.requireUser(deps.listItems))
 	mux.HandleFunc("POST /api/households/{householdId}/items", deps.requireUser(deps.createItem))
 	mux.HandleFunc("POST /api/items/{itemId}/quantity", deps.requireUser(deps.adjustQuantity))
+	mux.HandleFunc("PUT /api/items/{itemId}", deps.requireUser(deps.updateItem))
+	mux.HandleFunc("DELETE /api/items/{itemId}", deps.requireUser(deps.deleteItem))
+	mux.HandleFunc("GET /api/items/{itemId}/movements", deps.requireUser(deps.listMovements))
 	mux.Handle("/", webApp(deps.Assets))
 	return mux
 }

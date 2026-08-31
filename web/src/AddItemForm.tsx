@@ -21,6 +21,7 @@ export default function AddItemForm({
   const [name, setName] = useState('')
   const [unit, setUnit] = useState('')
   const [description, setDescription] = useState('')
+  const [threshold, setThreshold] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -38,6 +39,8 @@ export default function AddItemForm({
           name: name.trim(),
           unit: unit.trim(),
           description: description.trim() || undefined,
+          // Empty means "never warn me", which the API expects as null.
+          lowStockThreshold: threshold.trim() === '' ? null : Number(threshold),
         }),
       )
     } catch (err) {
@@ -102,6 +105,19 @@ export default function AddItemForm({
           onChange={(e) => setDescription(e.target.value)}
           maxLength={500}
           autoComplete="off"
+          className={inputClass}
+        />
+      </Field>
+
+      <Field label="เตือนเมื่อเหลือน้อยกว่าหรือเท่ากับ (ไม่บังคับ)" htmlFor="item-threshold">
+        <input
+          id="item-threshold"
+          type="number"
+          inputMode="numeric"
+          min={0}
+          value={threshold}
+          onChange={(e) => setThreshold(e.target.value)}
+          placeholder="ไม่เตือน"
           className={inputClass}
         />
       </Field>

@@ -255,13 +255,45 @@ type Item struct {
 	Unit        string `json:"unit"`
 	Description string `json:"description,omitempty"`
 	Quantity    int    `json:"quantity"`
+
+	// LowStockThreshold is optional. Absent means the item is never low: most things a
+	// household keeps are not worth tracking that closely.
+	LowStockThreshold *int `json:"lowStockThreshold,omitempty"`
+	// IsLow is derived in SQL, both to sort low items to the top and so the UI never
+	// has to repeat the comparison and risk disagreeing with the ordering.
+	IsLow bool `json:"isLow"`
 }
 
+// ItemInput is the writable half of an item, shared by create and update.
+type ItemInput struct {
+	Name              string
+	Unit              string
+	Description       string
+	LowStockThreshold *int
+}
+
+// Movement is one recorded change to an item's quantity, with the person who made it.
+type Movement struct {
+	ID              string    `json:"id"`
+	ActorName       string    `json:"actorName"`
+	ActorPictureURL string    `json:"actorPictureUrl,omitempty"`
+	QuantityBefore  int       `json:"quantityBefore"`
+	QuantityAfter   int       `json:"quantityAfter"`
+	Note            string    `json:"note,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+}
+
+// itemColumns is the projection every item read shares, including the derived low flag.
+const itemColumns = `i.id, i.name, i.unit, coalesce(i.description, ''), i.quantity,
+	i.low_stock_threshold,
+	(i.low_stock_threshold is not null and i.quantity <= i.low_stock_threshold) as is_low`
+
 const insertItem = `
-insert into items (household_id, name, unit, description, created_by)
-select $1, $2, $3, nullif($4, ''), $5
-where exists (select 1 from household_members where household_id = $1 and user_id = $5)
-returning id, name, unit, coalesce(description, ''), quantity`
+insert into items (household_id, name, unit, description, low_stock_threshold, created_by)
+select $1, $2, $3, nullif($4, ''), $5, $6
+where exists (select 1 from household_members where household_id = $1 and user_id = $6)
+returning id, name, unit, coalesce(description, ''), quantity, low_stock_threshold,
+          (low_stock_threshold is not null and quantity <= low_stock_threshold) as is_low`
 
 // CreateItem adds an item to a household.
 //
@@ -269,10 +301,11 @@ returning id, name, unit, coalesce(description, ''), quantity`
 // from a client is a claim, and doing it in one statement leaves no window between the
 // check and the write. A non-member gets ErrNotFound, not a permission error — whether
 // the household exists is none of their business.
-func (db *DB) CreateItem(ctx context.Context, householdID, userID, name, unit, description string) (Item, error) {
+func (db *DB) CreateItem(ctx context.Context, householdID, userID string, in ItemInput) (Item, error) {
 	var i Item
-	err := db.pool.QueryRow(ctx, insertItem, householdID, name, unit, description, userID).
-		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity)
+	err := db.pool.QueryRow(ctx, insertItem,
+		householdID, in.Name, in.Unit, in.Description, in.LowStockThreshold, userID).
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -287,11 +320,12 @@ func (db *DB) CreateItem(ctx context.Context, householdID, userID, name, unit, d
 }
 
 const selectItems = `
-select i.id, i.name, i.unit, coalesce(i.description, ''), i.quantity
+select ` + itemColumns + `
 from items i
 join household_members m on m.household_id = i.household_id and m.user_id = $2
-where i.household_id = $1
-order by i.name`
+where i.household_id = $1 and i.deleted_at is null
+-- Low items first so they are noticed before they run out, then alphabetically.
+order by is_low desc, i.name`
 
 // ItemsForHousehold lists a household's items for one of its members.
 func (db *DB) ItemsForHousehold(ctx context.Context, householdID, userID string) ([]Item, error) {
@@ -307,7 +341,8 @@ func (db *DB) ItemsForHousehold(ctx context.Context, householdID, userID string)
 	items := []Item{}
 	for rows.Next() {
 		var i Item
-		if err := rows.Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity); err != nil {
+		if err := rows.Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity,
+			&i.LowStockThreshold, &i.IsLow); err != nil {
 			return nil, fmt.Errorf("store: scan item: %w", err)
 		}
 		items = append(items, i)
@@ -322,7 +357,7 @@ const selectUnits = `
 select distinct i.unit
 from items i
 join household_members m on m.household_id = i.household_id and m.user_id = $2
-where i.household_id = $1
+where i.household_id = $1 and i.deleted_at is null
 order by i.unit`
 
 // UnitsForHousehold returns the units this household already uses, which the UI offers as
@@ -361,10 +396,10 @@ type QuantityChange struct {
 }
 
 const lockItemForUpdate = `
-select i.quantity, i.name, i.unit, coalesce(i.description, '')
+select i.quantity, i.name, i.unit, coalesce(i.description, ''), i.low_stock_threshold
 from items i
 join household_members m on m.household_id = i.household_id and m.user_id = $2
-where i.id = $1
+where i.id = $1 and i.deleted_at is null
 for update of i`
 
 const updateItemQuantity = `
@@ -392,7 +427,7 @@ func (db *DB) AdjustQuantity(ctx context.Context, itemID, userID string, change 
 	var before int
 	item := Item{ID: itemID}
 	err = tx.QueryRow(ctx, lockItemForUpdate, itemID, userID).
-		Scan(&before, &item.Name, &item.Unit, &item.Description)
+		Scan(&before, &item.Name, &item.Unit, &item.Description, &item.LowStockThreshold)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -410,6 +445,7 @@ func (db *DB) AdjustQuantity(ctx context.Context, itemID, userID string, change 
 	// is no movement to record, because nothing moved.
 	if after == before {
 		item.Quantity = before
+		item.IsLow = isLow(item.LowStockThreshold, before)
 		return item, tx.Commit(ctx)
 	}
 
@@ -425,7 +461,14 @@ func (db *DB) AdjustQuantity(ctx context.Context, itemID, userID string, change 
 	}
 
 	item.Quantity = after
+	item.IsLow = isLow(item.LowStockThreshold, after)
 	return item, nil
+}
+
+// isLow mirrors the SQL expression in itemColumns. The two must agree, or the list
+// ordering and the badge would disagree with each other.
+func isLow(threshold *int, quantity int) bool {
+	return threshold != nil && quantity <= *threshold
 }
 
 // targetQuantity resolves a requested change to a final quantity, floored at zero so that
@@ -439,4 +482,100 @@ func targetQuantity(before int, change QuantityChange) int {
 		after = before + *change.Delta
 	}
 	return max(after, 0)
+}
+
+const updateItemFields = `
+update items i
+set name = $3, unit = $4, description = nullif($5, ''), low_stock_threshold = $6, updated_at = now()
+where i.id = $1
+  and i.deleted_at is null
+  and exists (select 1 from household_members m where m.household_id = i.household_id and m.user_id = $2)
+returning i.id, i.name, i.unit, coalesce(i.description, ''), i.quantity, i.low_stock_threshold,
+          (i.low_stock_threshold is not null and i.quantity <= i.low_stock_threshold) as is_low`
+
+// UpdateItem changes an item's editable fields. It deliberately cannot touch quantity:
+// that only ever moves through AdjustQuantity, so every change is recorded (ADR-0001).
+func (db *DB) UpdateItem(ctx context.Context, itemID, userID string, in ItemInput) (Item, error) {
+	var i Item
+	err := db.pool.QueryRow(ctx, updateItemFields,
+		itemID, userID, in.Name, in.Unit, in.Description, in.LowStockThreshold).
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow)
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Item{}, ErrNotFound
+	case err != nil:
+		if isInvalidUUID(err) {
+			return Item{}, ErrNotFound
+		}
+		return Item{}, fmt.Errorf("store: update item: %w", err)
+	}
+	return i, nil
+}
+
+const softDeleteItem = `
+update items i
+set deleted_at = now()
+where i.id = $1
+  and i.deleted_at is null
+  and exists (select 1 from household_members m where m.household_id = i.household_id and m.user_id = $2)
+returning i.id`
+
+// DeleteItem marks an item deleted without removing the row.
+//
+// Its movements are append-only and must stay readable: a hard delete would either
+// orphan them or destroy the answer to "who used the last one".
+func (db *DB) DeleteItem(ctx context.Context, itemID, userID string) error {
+	var id string
+	err := db.pool.QueryRow(ctx, softDeleteItem, itemID, userID).Scan(&id)
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ErrNotFound
+	case err != nil:
+		if isInvalidUUID(err) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("store: delete item: %w", err)
+	}
+	return nil
+}
+
+const selectMovements = `
+select sm.id, u.display_name, coalesce(u.picture_url, ''),
+       sm.quantity_before, sm.quantity_after, coalesce(sm.note, ''), sm.created_at
+from stock_movements sm
+join items i on i.id = sm.item_id
+join users u on u.id = sm.user_id
+join household_members m on m.household_id = i.household_id and m.user_id = $2
+where sm.item_id = $1
+order by sm.created_at desc`
+
+// MovementsForItem returns an item's history, newest first.
+//
+// Deleted items are deliberately not excluded: the history is the reason the item is
+// soft-deleted rather than removed, so it stays readable afterwards.
+func (db *DB) MovementsForItem(ctx context.Context, itemID, userID string) ([]Movement, error) {
+	rows, err := db.pool.Query(ctx, selectMovements, itemID, userID)
+	if err != nil {
+		if isInvalidUUID(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: movements for item: %w", err)
+	}
+	defer rows.Close()
+
+	movements := []Movement{}
+	for rows.Next() {
+		var m Movement
+		if err := rows.Scan(&m.ID, &m.ActorName, &m.ActorPictureURL,
+			&m.QuantityBefore, &m.QuantityAfter, &m.Note, &m.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan movement: %w", err)
+		}
+		movements = append(movements, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: movements for item: %w", err)
+	}
+	return movements, nil
 }

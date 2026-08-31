@@ -1,8 +1,27 @@
 import { useCallback, useEffect, useState } from 'react'
 
-import { adjustQuantity, getItems, type Household, type Item, type User } from './api'
+import {
+  adjustQuantity,
+  deleteItem,
+  getItems,
+  updateItem,
+  type Household,
+  type Item,
+  type User,
+} from './api'
 import AddItemForm from './AddItemForm'
 import ItemRow from './ItemRow'
+
+/**
+ * Orders items the way the server does: low stock first so it is noticed before running
+ * out, then alphabetically. Kept in step with the SQL ordering in the store.
+ */
+function sortItems(items: Item[]): Item[] {
+  return [...items].sort((a, b) => {
+    if (a.isLow !== b.isLow) return a.isLow ? -1 : 1
+    return a.name.localeCompare(b.name, 'th')
+  })
+}
 
 /** The household someone lands in: its stock, and the controls to change it. */
 export default function HouseholdScreen({ household, user }: { household: Household; user: User }) {
@@ -103,6 +122,18 @@ export default function HouseholdScreen({ household, user }: { household: Househ
                 change(item, Math.max(0, item.quantity + delta), adjustQuantity(item.id, { delta }))
               }
               onSetTotal={(quantity, note) => change(item, quantity, adjustQuantity(item.id, { quantity, note }))}
+              onSave={async (input) => {
+                const saved = await updateItem(item.id, input)
+                // Re-sorting matters: editing a threshold can make an item low, and low
+                // items belong at the top of the list.
+                setItems((current) => sortItems((current ?? []).map((i) => (i.id === saved.id ? saved : i))))
+              }}
+              onDelete={async () => {
+                await deleteItem(item.id)
+                setItems((current) => (current ?? []).filter((i) => i.id !== item.id))
+                // A deleted item's unit may no longer be in use by anything.
+                reload().catch(() => {})
+              }}
             />
           ))}
         </ul>
@@ -115,7 +146,7 @@ export default function HouseholdScreen({ household, user }: { household: Househ
           onCancel={() => setAdding(false)}
           onAdded={(item) => {
             setAdding(false)
-            setItems((current) => [...(current ?? []), item].sort((a, b) => a.name.localeCompare(b.name, 'th')))
+            setItems((current) => sortItems([...(current ?? []), item]))
             if (!units.includes(item.unit)) setUnits((u) => [...u, item.unit].sort())
           }}
         />
