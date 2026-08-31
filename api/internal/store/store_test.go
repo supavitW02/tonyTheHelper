@@ -1563,3 +1563,231 @@ func TestAMultiCodePointIconRoundTrips(t *testing.T) {
 		t.Errorf("Icon = %q, want the joined emoji back unchanged", item.Icon)
 	}
 }
+
+// --- deleting a household ---------------------------------------------------------
+
+func TestDeletingAHouseholdRemovesItForEveryone(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-del-owner", "พ่อ")
+	mum := newUser(t, db, "U-del-mum", "แม่")
+	invite, _ := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if _, err := db.AcceptInvite(ctx, invite.Token, mum.ID, now); err != nil {
+		t.Fatalf("AcceptInvite: %v", err)
+	}
+
+	if err := db.DeleteHousehold(ctx, h.ID, dad.ID); err != nil {
+		t.Fatalf("DeleteHousehold: %v", err)
+	}
+
+	for _, who := range []struct {
+		name string
+		id   string
+	}{{"owner", dad.ID}, {"member", mum.ID}} {
+		households, err := db.HouseholdsForUser(ctx, who.id)
+		if err != nil {
+			t.Fatalf("%s: HouseholdsForUser: %v", who.name, err)
+		}
+		if len(households) != 0 {
+			t.Errorf("%s still sees %+v", who.name, households)
+		}
+		member, err := db.IsMember(ctx, h.ID, who.id)
+		if err != nil {
+			t.Fatalf("%s: IsMember: %v", who.name, err)
+		}
+		if member {
+			t.Errorf("%s is still a member of a deleted household", who.name)
+		}
+	}
+}
+
+// Every authorisation path resolves through household_members, so dropping those rows has
+// to be enough on its own — no endpoint should still be reachable afterwards.
+func TestADeletedHouseholdsItemsBecomeUnreachable(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	dad, h := household(t, db, "U-del-items", "พ่อ")
+	item, err := db.CreateItem(ctx, h.ID, dad.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	if err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+	bump(t, db, item.ID, dad.ID, 2)
+
+	if err := db.DeleteHousehold(ctx, h.ID, dad.ID); err != nil {
+		t.Fatalf("DeleteHousehold: %v", err)
+	}
+
+	// Reads that go through the membership join come back empty rather than erroring,
+	// which is how they have always answered for a household you do not belong to.
+	items, err := db.ItemsForHousehold(ctx, h.ID, dad.ID)
+	if err != nil {
+		t.Fatalf("ItemsForHousehold: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("items still listed after deletion: %+v", items)
+	}
+
+	// Writes and the membership-checked reads refuse outright.
+	one := 1
+	if _, err := db.AdjustQuantity(ctx, item.ID, dad.ID, store.QuantityChange{Delta: &one}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("AdjustQuantity: error = %v, want ErrNotFound", err)
+	}
+	movements, err := db.MovementsForItem(ctx, item.ID, dad.ID)
+	if err != nil {
+		t.Fatalf("MovementsForItem: %v", err)
+	}
+	if len(movements) != 0 {
+		t.Errorf("movements still readable through the app: %d rows", len(movements))
+	}
+	if _, err := db.MovementsForHousehold(ctx, h.ID, dad.ID,
+		store.MovementFilter{Limit: store.HouseholdHistoryLimit}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("MovementsForHousehold: error = %v, want ErrNotFound", err)
+	}
+	if _, err := db.UpdateItem(ctx, item.ID, dad.ID, store.ItemInput{Name: "x", Unit: "y"}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("UpdateItem: error = %v, want ErrNotFound", err)
+	}
+}
+
+// The history is not erased — ADR-0001 — it is only unreachable. The rows are still there.
+func TestDeletingAHouseholdKeepsItsHistoryOnDisk(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	dad, h := household(t, db, "U-del-history", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, dad.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	bump(t, db, item.ID, dad.ID, 3)
+
+	if err := db.DeleteHousehold(ctx, h.ID, dad.ID); err != nil {
+		t.Fatalf("DeleteHousehold: %v", err)
+	}
+
+	if n := movementCount(t, item.ID); n != 3 {
+		t.Errorf("%d movement rows survive, want 3 — deletion must not erase history", n)
+	}
+}
+
+// An outstanding invite would otherwise let someone join a household that no longer
+// exists, handing them a membership row and access to its items.
+func TestDeletingAHouseholdVoidsItsOutstandingInvites(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-del-invite", "พ่อ")
+	invite, err := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+	stranger := newUser(t, db, "U-del-invitee", "คนใหม่")
+
+	if err := db.DeleteHousehold(ctx, h.ID, dad.ID); err != nil {
+		t.Fatalf("DeleteHousehold: %v", err)
+	}
+
+	if _, err := db.AcceptInvite(ctx, invite.Token, stranger.ID, now); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("accepting an invite to a deleted household: error = %v, want ErrNotFound", err)
+	}
+}
+
+// last_household_id has no cascade, so a user still pointing at the deleted household
+// would either block the write or be sent to a household they cannot see on next open.
+func TestDeletingAHouseholdReleasesItAsAnyonesLanding(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-del-landing", "พ่อ")
+	mum := newUser(t, db, "U-del-landing-mum", "แม่")
+	invite, _ := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if _, err := db.AcceptInvite(ctx, invite.Token, mum.ID, now); err != nil {
+		t.Fatalf("AcceptInvite: %v", err)
+	}
+
+	if err := db.DeleteHousehold(ctx, h.ID, dad.ID); err != nil {
+		t.Fatalf("DeleteHousehold: %v", err)
+	}
+
+	for _, who := range []struct {
+		name string
+		id   string
+	}{{"owner", dad.ID}, {"member", mum.ID}} {
+		u, err := db.UserByID(ctx, who.id)
+		if err != nil {
+			t.Fatalf("%s: UserByID: %v", who.name, err)
+		}
+		if u.LastHouseholdID != "" {
+			t.Errorf("%s still lands on the deleted household (%q)", who.name, u.LastHouseholdID)
+		}
+	}
+}
+
+func TestOnlyTheOwnerCanDeleteAHousehold(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-del-notowner", "พ่อ")
+	mum := newUser(t, db, "U-del-notowner-mum", "แม่")
+	stranger := newUser(t, db, "U-del-notowner-out", "คนแปลกหน้า")
+	invite, _ := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if _, err := db.AcceptInvite(ctx, invite.Token, mum.ID, now); err != nil {
+		t.Fatalf("AcceptInvite: %v", err)
+	}
+
+	if err := db.DeleteHousehold(ctx, h.ID, mum.ID); !errors.Is(err, store.ErrNotOwner) {
+		t.Errorf("member: error = %v, want ErrNotOwner", err)
+	}
+	// An outsider must not learn the household is there to be deleted.
+	if err := db.DeleteHousehold(ctx, h.ID, stranger.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("outsider: error = %v, want ErrNotFound", err)
+	}
+
+	// ...and both refusals left it alone.
+	households, err := db.HouseholdsForUser(ctx, dad.ID)
+	if err != nil {
+		t.Fatalf("HouseholdsForUser: %v", err)
+	}
+	if len(households) != 1 {
+		t.Errorf("owner sees %d households, want the one that was not deleted", len(households))
+	}
+}
+
+func TestDeletingAHouseholdTwiceIsNotFound(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	dad, h := household(t, db, "U-del-twice", "พ่อ")
+
+	if err := db.DeleteHousehold(ctx, h.ID, dad.ID); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	if err := db.DeleteHousehold(ctx, h.ID, dad.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("second delete: error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeletingOneHouseholdLeavesTheOthers(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	dad, keep := household(t, db, "U-del-two", "พ่อ")
+	drop, err := db.CreateHousehold(ctx, dad.ID, "บ้านที่จะลบ")
+	if err != nil {
+		t.Fatalf("CreateHousehold: %v", err)
+	}
+	item, _ := db.CreateItem(ctx, keep.ID, dad.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+
+	if err := db.DeleteHousehold(ctx, drop.ID, dad.ID); err != nil {
+		t.Fatalf("DeleteHousehold: %v", err)
+	}
+
+	households, err := db.HouseholdsForUser(ctx, dad.ID)
+	if err != nil {
+		t.Fatalf("HouseholdsForUser: %v", err)
+	}
+	if len(households) != 1 || households[0].ID != keep.ID {
+		t.Fatalf("remaining households = %+v, want just %q", households, keep.ID)
+	}
+	items, err := db.ItemsForHousehold(ctx, keep.ID, dad.ID)
+	if err != nil {
+		t.Fatalf("ItemsForHousehold: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != item.ID {
+		t.Errorf("the surviving household lost its items: %+v", items)
+	}
+}
