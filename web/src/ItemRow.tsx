@@ -281,7 +281,7 @@ function History({ itemId, unit }: { itemId: string; unit: string }) {
               <span>
                 <strong className="font-medium">{m.actorName}</strong> {m.quantityBefore} → {m.quantityAfter} {unit}
               </span>
-              <span className="text-slate-500">
+              <span className="text-slate-600">
                 {new Date(m.createdAt).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}
               </span>
               {m.note && <span className="text-slate-600">“{m.note}”</span>}

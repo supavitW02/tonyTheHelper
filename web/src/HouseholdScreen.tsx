@@ -87,7 +87,7 @@ export default function HouseholdScreen({ household, user }: { household: Househ
         )}
         <div className="flex min-w-0 flex-1 flex-col">
           <h2 className="text-2xl font-semibold break-words">{household.name}</h2>
-          {household.isOwner && <span className="text-slate-500">เจ้าของบ้าน</span>}
+          {household.isOwner && <span className="text-slate-600">เจ้าของบ้าน</span>}
         </div>
       </header>
 

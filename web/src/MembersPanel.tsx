@@ -89,7 +89,7 @@ export default function MembersPanel({ household, meId }: { household: Household
                 )}
                 <span className="min-w-0 flex-1 break-words">
                   {m.displayName}
-                  {m.isOwner && <span className="text-slate-500"> · เจ้าของบ้าน</span>}
+                  {m.isOwner && <span className="text-slate-600"> · เจ้าของบ้าน</span>}
                 </span>
               </div>
               {/* Only the owner manages people, and nobody removes themselves. */}
