@@ -2,10 +2,24 @@
 <html lang="th">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/png" href="/tony.png" />
-    <!-- What iOS uses if someone adds the app to their home screen from Safari. -->
-    <link rel="apple-touch-icon" href="/tony.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <!--
+      The home-screen icon. These have to be truecolour PNGs: an indexed-palette PNG is
+      silently ignored by iOS, which then substitutes a screenshot of the page instead of
+      the icon.
+    -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#3d6f1f" />
+    <!--
+      Both spellings. `mobile-web-app-capable` is the standard one Chrome asks for; the
+      apple-prefixed one is deprecated but is still what older iOS reads for a standalone
+      launch, and this app has to work on whatever phone a family member already owns.
+    -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Tony" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -13,7 +27,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
-    <title>ของใช้ในบ้าน</title>
+    <title>Tony The Helper</title>
   </head>
   <body>
     <div id="root">
