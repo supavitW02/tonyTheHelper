@@ -35,6 +35,7 @@ type Users interface {
 type Households interface {
 	CreateHousehold(ctx context.Context, ownerID, name string) (store.Household, error)
 	RenameHousehold(ctx context.Context, householdID, ownerID, name string) (store.Household, error)
+	DeleteHousehold(ctx context.Context, householdID, ownerID string) error
 	HouseholdsForUser(ctx context.Context, userID string) ([]store.Household, error)
 	CreateInvite(ctx context.Context, householdID, ownerID string, now time.Time) (store.Invite, error)
 	AcceptInvite(ctx context.Context, token, userID string, now time.Time) (store.Household, error)
@@ -94,6 +95,7 @@ func New(deps Deps) http.Handler {
 	mux.HandleFunc("GET /api/households", deps.requireUser(deps.listHouseholds))
 	mux.HandleFunc("POST /api/households", deps.requireUser(deps.createHousehold))
 	mux.HandleFunc("PATCH /api/households/{householdId}", deps.requireUser(deps.renameHousehold))
+	mux.HandleFunc("DELETE /api/households/{householdId}", deps.requireUser(deps.deleteHousehold))
 	mux.HandleFunc("GET /api/households/{householdId}/items", deps.requireUser(deps.listItems))
 	mux.HandleFunc("POST /api/households/{householdId}/items", deps.requireUser(deps.createItem))
 	mux.HandleFunc("POST /api/items/{itemId}/quantity", deps.requireUser(deps.adjustQuantity))

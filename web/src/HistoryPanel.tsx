@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { getHouseholdHistory, type Household, type HouseholdMovement, type ItemRef } from './api'
+import QuantityDiff from './QuantityDiff'
 import { inputClass, linkActionClass, Notice, primaryButtonClass } from './ui'
 
 /** What the list currently reflects, as opposed to what is typed into the controls. */
@@ -149,7 +150,8 @@ export default function HistoryPanel({ household, active }: { household: Househo
                   <strong className="font-medium">{m.itemName}</strong>{' '}
                   <span className="whitespace-nowrap">
                     {m.quantityBefore} → {m.quantityAfter} {m.unit}
-                  </span>
+                  </span>{' '}
+                  <QuantityDiff before={m.quantityBefore} after={m.quantityAfter} />
                 </span>
                 <span className="text-slate-600">
                   {m.actorName} ·{' '}

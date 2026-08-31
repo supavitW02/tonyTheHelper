@@ -220,6 +220,74 @@ func (db *DB) RenameHousehold(ctx context.Context, householdID, ownerID, name st
 	return h, nil
 }
 
+const markHouseholdDeleted = `
+update households set deleted_at = now(), updated_at = now()
+where id = $1 and deleted_at is null`
+
+const dropHouseholdMemberships = `
+delete from household_members where household_id = $1`
+
+const dropHouseholdInvites = `
+delete from invites where household_id = $1`
+
+const releaseHouseholdAsLanding = `
+update users set last_household_id = null, updated_at = now() where last_household_id = $1`
+
+// DeleteHousehold makes a household inaccessible to everyone. Owner only.
+//
+// It revokes access rather than erasing anything. ADR-0001 makes the movement log
+// append-only and the schema agrees — stock_movements has no cascade and is commented
+// "never deleted" — so a cascade would have to delete history explicitly, against the one
+// rule the storage design is built on. The items and their history stay on disk.
+//
+// What makes that sufficient is that every authorisation path in this app resolves through
+// household_members: listing items, adjusting a quantity, reading movements, checking
+// ownership. Dropping those rows closes all of them at once, with no query needing to
+// learn about a new flag — and no risk of one being missed.
+//
+// The other two writes exist because those tables do not cascade from this one either:
+// an outstanding invite would hand someone a fresh membership row to a household that no
+// longer exists, and users.last_household_id would still point at it on their next open.
+func (db *DB) DeleteHousehold(ctx context.Context, householdID, ownerID string) error {
+	if err := db.requireOwner(ctx, householdID, ownerID); err != nil {
+		return err
+	}
+
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+
+	tag, err := tx.Exec(ctx, markHouseholdDeleted, householdID)
+	if err != nil {
+		return fmt.Errorf("store: mark household deleted: %w", err)
+	}
+	// Already deleted. requireOwner passed only because a membership row still existed,
+	// which should not happen — treat it as gone rather than half-deleting it again.
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+
+	for _, step := range []struct {
+		what string
+		sql  string
+	}{
+		{"memberships", dropHouseholdMemberships},
+		{"invites", dropHouseholdInvites},
+		{"landing", releaseHouseholdAsLanding},
+	} {
+		if _, err := tx.Exec(ctx, step.sql, householdID); err != nil {
+			return fmt.Errorf("store: delete household %s: %w", step.what, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit: %w", err)
+	}
+	return nil
+}
+
 const selectHouseholdsForUser = `
 select h.id, h.name, h.owner_id
 from households h

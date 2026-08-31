@@ -98,6 +98,22 @@ export default function App() {
     )
   }
 
+  /**
+   * A deleted household has to disappear from the switcher and from under the user.
+   *
+   * Where they land next is the interesting part: their other households if they have
+   * any, and otherwise the create screen — the same place a brand new user starts, since
+   * belonging to nothing is exactly the state they are now in.
+   */
+  function applyDeletion(householdId: string) {
+    setState((current) => {
+      if (current.status !== 'ready') return current
+      const left = current.households.filter((h) => h.id !== householdId)
+      if (left.length === 0) return { status: 'needsHousehold', user: current.user }
+      return { ...current, households: left, currentId: left[0].id }
+    })
+  }
+
   const current = state.status === 'ready' ? state.households.find((h) => h.id === state.currentId) : undefined
 
   return (
@@ -156,7 +172,13 @@ export default function App() {
       {state.status === 'ready' && current && (
         // Keyed by household so switching resets the item list rather than showing the
         // previous household's stock while the new one loads.
-        <HouseholdScreen key={current.id} household={current} user={state.user} onRenamed={applyRename} />
+        <HouseholdScreen
+          key={current.id}
+          household={current}
+          user={state.user}
+          onRenamed={applyRename}
+          onDeleted={applyDeletion}
+        />
       )}
 
       {state.status === 'ready' && creatingAnother && (
