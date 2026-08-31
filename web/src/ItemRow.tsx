@@ -68,7 +68,7 @@ export default function ItemRow({
         </StepButton>
       </div>
 
-      <div className="flex flex-wrap gap-x-6 gap-y-1">
+      <div className="flex flex-wrap gap-x-6 gap-y-2">
         <SmallAction onClick={() => toggle('history')} expanded={panel === 'history'}>
           ประวัติ
         </SmallAction>
@@ -92,7 +92,7 @@ export default function ItemRow({
         />
       )}
 
-      {panel === 'history' && <History itemId={item.id} unit={item.unit} />}
+      {panel === 'history' && <History itemId={item.id} unit={item.unit} quantity={item.quantity} />}
 
       {panel === 'photo' && (
         <Panelled>
@@ -187,6 +187,21 @@ function StepButton({
   )
 }
 
+/**
+ * One of the row's actions: history, photo, edit.
+ *
+ * Which one is open used to be conveyed by weight alone, which is a small difference to
+ * notice on a phone held at arm's length. Open now gets a filled pill and lifts slightly
+ * out of the row, so the state is carried by shape and position as well as by colour —
+ * and the panel below it is no longer the only clue about which action produced it.
+ *
+ * The horizontal padding is cancelled by an equal negative margin so the labels stay
+ * aligned with the rest of the row whether or not one is open, and the tap target still
+ * clears the 48px floor on both axes.
+ *
+ * The lift is dropped for anyone who has asked for less motion; the pill is not, because
+ * it is the part doing the work.
+ */
 function SmallAction({
   onClick,
   expanded,
@@ -201,8 +216,10 @@ function SmallAction({
       type="button"
       onClick={onClick}
       aria-expanded={expanded}
-      className={`-mx-2 min-h-12 px-2 text-accent-700 underline underline-offset-4 ${
-        expanded ? 'font-medium text-accent-800' : ''
+      className={`-mx-3 inline-flex min-h-12 items-center rounded-lg px-3 underline underline-offset-4 transition-all duration-200 motion-reduce:transition-none ${
+        expanded
+          ? '-translate-y-1 bg-brand-100 font-semibold text-accent-800 motion-reduce:translate-y-0'
+          : 'translate-y-0 text-accent-700'
       }`}
     >
       {children}
@@ -262,8 +279,19 @@ function SetTotalForm({
   )
 }
 
-/** The question a shared household actually asks: who used the last one, and when. */
-function History({ itemId, unit }: { itemId: string; unit: string }) {
+/**
+ * The question a shared household actually asks: who used the last one, and when.
+ *
+ * Refetches whenever the item's quantity changes, not only when the panel opens. Left to
+ * fetch once, an open panel goes stale the moment anyone taps plus — including the person
+ * looking at it — and quietly shows a history that stops short of the number above it.
+ *
+ * The quantity is the right trigger because it moves for exactly the reasons a movement is
+ * recorded: this device's own taps, and the list refetching someone else's. It is also
+ * updated optimistically, so a burst of taps would mean a burst of requests; the delay
+ * collapses them into one fetch after the tapping stops.
+ */
+function History({ itemId, unit, quantity }: { itemId: string; unit: string; quantity: number }) {
   const [movements, setMovements] = useState<Movement[] | null>(null)
   const [failed, setFailed] = useState(false)
 
@@ -271,21 +299,25 @@ function History({ itemId, unit }: { itemId: string; unit: string }) {
   // opens, and fetching in the render path would re-fire on every re-render.
   useEffect(() => {
     let cancelled = false
+    const settle = setTimeout(() => {
+      if (cancelled) return
 
-    getMovements(itemId)
-      .then(({ movements }) => {
-        if (!cancelled) setMovements(movements)
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return
-        console.error('load history failed', err)
-        setFailed(true)
-      })
+      getMovements(itemId)
+        .then(({ movements }) => {
+          if (!cancelled) setMovements(movements)
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return
+          console.error('load history failed', err)
+          setFailed(true)
+        })
+    }, DEBOUNCE_MS)
 
     return () => {
       cancelled = true
+      clearTimeout(settle)
     }
-  }, [itemId])
+  }, [itemId, quantity])
 
   return (
     <Panelled>
@@ -323,6 +355,9 @@ function History({ itemId, unit }: { itemId: string; unit: string }) {
 
 /** Mirrors ItemHistoryLimit in the API, which is what actually caps the list. */
 const ITEM_HISTORY_LIMIT = 10
+
+/** Long enough that a burst of plus taps becomes one refetch, short enough to feel immediate. */
+const DEBOUNCE_MS = 400
 
 /** Choosing a photo. accept="image/*" is what offers the camera or the gallery on a phone. */
 function PhotoPicker({ item, onPhoto }: { item: Item; onPhoto: (file: File) => Promise<void> }) {

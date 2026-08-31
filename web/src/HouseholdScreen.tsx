@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   adjustQuantity,
@@ -16,16 +16,17 @@ import HistoryPanel from './HistoryPanel'
 import ItemRow from './ItemRow'
 import MembersPanel from './MembersPanel'
 import RenameHousehold from './RenameHousehold'
-import { Avatar, linkActionClass, Notice, primaryButtonClass } from './ui'
+import { Avatar, Dialog, inputClass, linkActionClass, Notice, primaryButtonClass } from './ui'
 
 /**
- * The two things a household screen is about. They used to share one scroll, with the
- * member list expanding in the middle of it and shoving the stock list down the page.
- * Tabs give each one the whole screen and stop either from moving the other.
+ * The two things this screen is for day to day.
+ *
+ * Members used to be a third tab, which cost the strip a whole extra row at phone width —
+ * three of these labels do not fit across 375px. It is a rare errand, so it moved next to
+ * the other rare errand, creating a household, and opens as a dialog from there.
  */
 const TABS = [
   { id: 'items', label: 'ของใช้' },
-  { id: 'members', label: 'สมาชิก' },
   { id: 'history', label: 'ประวัติของใช้' },
 ] as const
 
@@ -42,27 +43,46 @@ function sortItems(items: Item[]): Item[] {
   })
 }
 
+/**
+ * Matches an item against the search box.
+ *
+ * A plain substring over the name and the unit, which is what someone typing "น้ำ" or
+ * "ขวด" expects. No pattern semantics, so a typed % or _ finds nothing rather than
+ * everything.
+ */
+function matches(item: Item, query: string): boolean {
+  const q = query.trim().toLowerCase()
+  if (q === '') return true
+  return item.name.toLowerCase().includes(q) || item.unit.toLowerCase().includes(q)
+}
+
 /** The household someone lands in: its stock, and the controls to change it. */
 export default function HouseholdScreen({
   household,
   user,
   onRenamed,
   onDeleted,
+  membersOpen,
+  onCloseMembers,
 }: {
   household: Household
   user: User
   onRenamed: (household: Household) => void
   onDeleted: (householdId: string) => void
+  /** Driven from the top of the screen, beside the create-household button. */
+  membersOpen: boolean
+  onCloseMembers: () => void
 }) {
   const [tab, setTab] = useState<Tab>('items')
   const [items, setItems] = useState<Item[] | null>(null)
   const [units, setUnits] = useState<string[]>([])
   const [adding, setAdding] = useState(false)
   const [renaming, setRenaming] = useState(false)
+  const [query, setQuery] = useState('')
   const [error, setError] = useState<string | null>(null)
   // Requests in flight per item. While any are outstanding the displayed quantity is
   // optimistic, so a rapid tapper is not left waiting on the network between taps.
-  const [, setPending] = useState<Record<string, number>>({})
+  const [pending, setPending] = useState<Record<string, number>>({})
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({})
 
   const reload = useCallback(async () => {
@@ -77,6 +97,31 @@ export default function HouseholdScreen({
       setError('โหลดรายการไม่สำเร็จ')
     })
   }, [reload])
+
+  const anythingInFlight = Object.values(pending).some((n) => n > 0)
+
+  /**
+   * Refetches when the screen is looked at again.
+   *
+   * This is a household shared by several people. Someone else takes the last bottle
+   * while this phone is in a pocket, and without this the number on screen is simply
+   * wrong the next time it is looked at, with no way to find that out short of quitting
+   * the app. Coming back into view is the moment that matters, so that is the trigger; a
+   * poll would spend a suspended machine's wake-ups and a phone's data on nothing.
+   *
+   * Skipped while a quantity change is in flight: the number shown is deliberately
+   * optimistic then, and a refetch would replace it with the value from before the tap.
+   */
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState !== 'visible' || anythingInFlight) return
+      reload().catch((err: unknown) => {
+        console.error('refresh items failed', err)
+      })
+    }
+    document.addEventListener('visibilitychange', refresh)
+    return () => document.removeEventListener('visibilitychange', refresh)
+  }, [reload, anythingInFlight])
 
   /**
    * Applies a quantity change optimistically, then reconciles with the server.
@@ -120,6 +165,9 @@ export default function HouseholdScreen({
     tabRefs.current[next]?.focus()
   }
 
+  const visible = useMemo(() => (items ?? []).filter((i) => matches(i, query)), [items, query])
+  const searching = query.trim() !== ''
+
   return (
     <div className="flex flex-col gap-6">
       <header className="flex items-start gap-3">
@@ -143,7 +191,7 @@ export default function HouseholdScreen({
         role="tablist"
         aria-label="มุมมองของบ้าน"
         onKeyDown={onTabKeyDown}
-        className="flex flex-wrap gap-2 rounded-xl bg-brand-100 p-2"
+        className="flex gap-2 rounded-xl bg-brand-100 p-2"
       >
         {TABS.map((t) => {
           const selected = t.id === tab
@@ -161,9 +209,8 @@ export default function HouseholdScreen({
               // Roving tabindex: the tab strip is one stop, arrows move within it.
               tabIndex={selected ? 0 : -1}
               onClick={() => setTab(t.id)}
-              // A white face on the tinted strip, so each tab reads as its own control.
-              // Three tabs do not fit one row at 375px and the strip wraps; without a
-              // face the wrapped tab looked like a stray caption rather than a button.
+              // A white face on the tinted strip, so an unselected tab still reads as its
+              // own control rather than as a caption.
               className={`min-h-14 flex-1 rounded-lg px-3 font-medium whitespace-nowrap ${
                 selected ? 'bg-brand-700 text-white' : 'bg-white text-brand-800'
               }`}
@@ -184,6 +231,26 @@ export default function HouseholdScreen({
             </button>
           )}
 
+          {/* Filters what is already on screen rather than asking the server: the whole
+              list is here, so results are instant and keep working with no signal. */}
+          {items !== null && items.length > 0 && (
+            <div className="flex flex-col gap-2">
+              <label htmlFor="item-search" className="font-medium">
+                ค้นหาของ
+              </label>
+              <input
+                id="item-search"
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                maxLength={100}
+                autoComplete="off"
+                placeholder="เช่น น้ำปลา"
+                className={inputClass}
+              />
+            </div>
+          )}
+
           {error && <Notice>{error}</Notice>}
 
           {items === null && <Notice tone="info">กำลังโหลดรายการ…</Notice>}
@@ -197,9 +264,26 @@ export default function HouseholdScreen({
             </section>
           )}
 
-          {items && items.length > 0 && (
+          {/* A search that hides everything has to say so, and getting back has to be one
+              tap — otherwise the list just looks empty. */}
+          {items !== null && items.length > 0 && visible.length === 0 && (
+            <div className="flex flex-col items-start gap-3 rounded-xl bg-brand-50 px-4 py-6">
+              <p className="text-slate-600">ไม่พบของที่ค้นหา</p>
+              <button type="button" onClick={() => setQuery('')} className={linkActionClass}>
+                ดูทั้งหมด
+              </button>
+            </div>
+          )}
+
+          {searching && visible.length > 0 && (
+            <p className="text-slate-600">
+              พบ {visible.length} จาก {items?.length} รายการ
+            </p>
+          )}
+
+          {visible.length > 0 && (
             <ul aria-label="รายการของใช้" className="flex flex-col gap-3">
-              {items.map((item) => (
+              {visible.map((item) => (
                 <ItemRow
                   key={item.id}
                   item={item}
@@ -212,6 +296,9 @@ export default function HouseholdScreen({
                     // Re-sorting matters: editing a threshold can make an item low, and low
                     // items belong at the top of the list.
                     setItems((current) => sortItems((current ?? []).map((i) => (i.id === saved.id ? saved : i))))
+                    // An edit can take a unit out of use or bring a new one in, and the
+                    // chips offered when adding the next item come from that list.
+                    reload().catch(() => {})
                   }}
                   onPhoto={async (file) => {
                     const saved = await uploadItemPhoto(item.id, file)
@@ -230,23 +317,28 @@ export default function HouseholdScreen({
         </div>
       </div>
 
-      {/* Every panel stays mounted so the tabs' aria-controls always point at something
-          real, but each only fetches once its tab has actually been opened. */}
-      <div role="tabpanel" id="panel-members" aria-labelledby="tab-members" hidden={tab !== 'members'}>
-        <div className="flex flex-col gap-8">
-          <MembersPanel household={household} meId={user.id} active={tab === 'members'} />
-          {/* Last on the tab, and owner-only. Rendered here rather than inside
-              MembersPanel because the confirmation needs the real item count, and that
-              list is not the member panel's business. */}
-          {household.isOwner && (
-            <DeleteHousehold household={household} itemCount={items?.length ?? 0} onDeleted={onDeleted} />
-          )}
-        </div>
-      </div>
-
+      {/* Both panels stay mounted so the tabs' aria-controls always point at something
+          real, but the history only fetches once its tab has been opened. */}
       <div role="tabpanel" id="panel-history" aria-labelledby="tab-history" hidden={tab !== 'history'}>
         <HistoryPanel household={household} active={tab === 'history'} />
       </div>
+
+      {membersOpen && (
+        <Dialog title="สมาชิกในบ้าน" onClose={onCloseMembers}>
+          <div className="flex flex-col gap-8">
+            <MembersPanel household={household} meId={user.id} active={membersOpen} />
+            {/* Owner-only, and last. Rendered here rather than inside MembersPanel
+                because the confirmation needs the real item count, and that list is not
+                the member panel's business. */}
+            {household.isOwner && (
+              <DeleteHousehold household={household} itemCount={items?.length ?? 0} onDeleted={onDeleted} />
+            )}
+            <button type="button" onClick={onCloseMembers} className={`${primaryButtonClass} w-full`}>
+              ปิด
+            </button>
+          </div>
+        </Dialog>
+      )}
 
       {adding && (
         <AddItemForm

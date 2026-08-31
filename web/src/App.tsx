@@ -38,6 +38,9 @@ export default function App() {
   // Creating an additional household is rare, so it stays behind a deliberate tap
   // rather than occupying space next to the daily actions.
   const [creatingAnother, setCreatingAnother] = useState(false)
+  // Managing members is a rare errand, so it lives up here beside the other rare errand
+  // rather than taking a third of the tab strip on every screen.
+  const [membersOpen, setMembersOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -136,12 +139,12 @@ export default function App() {
       )}
 
       {state.status === 'ready' && (
-        <div className="flex items-end gap-3">
+        <div className="flex flex-col gap-3">
           {/* The switcher only exists for someone who belongs to more than one household:
               with a single one there is nothing to switch to, and an empty picker would
               only be a question the user has to work out the answer to. */}
           {state.households.length > 1 && (
-            <div className="flex min-w-0 flex-1 flex-col gap-2">
+            <div className="flex flex-col gap-2">
               <label htmlFor="household-switch" className="font-medium">
                 บ้าน
               </label>
@@ -159,13 +162,27 @@ export default function App() {
               </select>
             </div>
           )}
-          <button
-            type="button"
-            onClick={() => setCreatingAnother(true)}
-            className={`${secondaryButtonClass} shrink-0 whitespace-nowrap`}
-          >
-            + บ้านใหม่
-          </button>
+
+          {/* The two rare errands, side by side and out of the way of the daily screen.
+              Their own row rather than beside the switcher: at 375px a select plus two
+              labelled buttons does not fit across, and stacking them next to the select
+              left it bottom-aligned against a block twice its height. */}
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={() => setMembersOpen(true)}
+              className={`${secondaryButtonClass} flex-1 whitespace-nowrap`}
+            >
+              สมาชิก
+            </button>
+            <button
+              type="button"
+              onClick={() => setCreatingAnother(true)}
+              className={`${secondaryButtonClass} flex-1 whitespace-nowrap`}
+            >
+              + บ้านใหม่
+            </button>
+          </div>
         </div>
       )}
 
@@ -178,6 +195,8 @@ export default function App() {
           user={state.user}
           onRenamed={applyRename}
           onDeleted={applyDeletion}
+          membersOpen={membersOpen}
+          onCloseMembers={() => setMembersOpen(false)}
         />
       )}
 
