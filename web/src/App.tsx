@@ -4,6 +4,7 @@ import { acceptInvite, ApiError, getHouseholds, selectHousehold, type Household,
 import CreateHousehold from './CreateHousehold'
 import HouseholdScreen from './HouseholdScreen'
 import { resolveUser } from './signIn'
+import { inputClass, linkActionClass, Notice, primaryButtonClass } from './ui'
 
 type State =
   | { status: 'loading' }
@@ -88,26 +89,27 @@ export default function App() {
     }
   }
 
+  /** A rename has to reach the switcher too, not just the header it was typed in. */
+  function applyRename(renamed: Household) {
+    setState((current) =>
+      current.status === 'ready'
+        ? { ...current, households: current.households.map((h) => (h.id === renamed.id ? renamed : h)) }
+        : current,
+    )
+  }
+
   const current = state.status === 'ready' ? state.households.find((h) => h.id === state.currentId) : undefined
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col gap-6 px-6 py-10">
-      <h1 className="text-3xl font-semibold">ของใช้ในบ้าน</h1>
+      <h1 className="flex items-center gap-3 text-3xl font-semibold text-brand-800">
+        <img src="/tony.png" alt="" width={192} height={192} className="size-10 shrink-0" />
+        ของใช้ในบ้าน
+      </h1>
 
-      {notice && (
-        <p aria-live="assertive" className="flex min-h-12 items-center gap-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-900">
-          <span aria-hidden="true" className="text-2xl leading-none">
-            ✕
-          </span>
-          <span>{notice}</span>
-        </p>
-      )}
+      {notice && <Notice>{notice}</Notice>}
 
-      {state.status === 'loading' && (
-        <p aria-live="polite" className="flex min-h-12 items-center rounded-xl bg-slate-100 px-4 py-3 text-slate-700">
-          กำลังเข้าสู่ระบบ…
-        </p>
-      )}
+      {state.status === 'loading' && <Notice tone="info">กำลังเข้าสู่ระบบ…</Notice>}
 
       {state.status === 'needsHousehold' && (
         <CreateHousehold
@@ -128,7 +130,7 @@ export default function App() {
             id="household-switch"
             value={state.currentId}
             onChange={(e) => void switchTo(e.target.value)}
-            className="min-h-14 rounded-xl border-2 border-slate-300 bg-white px-4"
+            className={inputClass}
           >
             {state.households.map((h) => (
               <option key={h.id} value={h.id}>
@@ -142,7 +144,7 @@ export default function App() {
       {state.status === 'ready' && current && (
         // Keyed by household so switching resets the item list rather than showing the
         // previous household's stock while the new one loads.
-        <HouseholdScreen key={current.id} household={current} user={state.user} />
+        <HouseholdScreen key={current.id} household={current} user={state.user} onRenamed={applyRename} />
       )}
 
       {state.status === 'ready' &&
@@ -162,25 +164,16 @@ export default function App() {
           <button
             type="button"
             onClick={() => setCreatingAnother(true)}
-            className="min-h-12 self-start text-slate-600 underline underline-offset-4"
+            className={`${linkActionClass} self-start`}
           >
             สร้างบ้านใหม่
           </button>
         ))}
 
       {state.status === 'failed' && (
-        <section aria-live="assertive" className="flex flex-col gap-4">
-          <p className="flex min-h-12 items-center gap-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-900">
-            <span aria-hidden="true" className="text-2xl leading-none">
-              ✕
-            </span>
-            <span>{state.message}</span>
-          </p>
-          <button
-            type="button"
-            onClick={() => window.location.reload()}
-            className="min-h-14 rounded-xl bg-slate-900 px-4 py-3 font-medium text-white"
-          >
+        <section className="flex flex-col gap-4">
+          <Notice>{state.message}</Notice>
+          <button type="button" onClick={() => window.location.reload()} className={primaryButtonClass}>
             ลองใหม่
           </button>
         </section>

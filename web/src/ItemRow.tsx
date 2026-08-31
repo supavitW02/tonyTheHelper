@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { getMovements, itemImageUrl, type Item, type ItemInput, type Movement } from './api'
+import { dangerButtonClass, inputClass, primaryButtonClass, secondaryButtonClass } from './ui'
 
 type Panel = null | 'total' | 'history' | 'edit' | 'photo'
 
@@ -31,7 +32,7 @@ export default function ItemRow({
   const toggle = (next: Exclude<Panel, null>) => setPanel((open) => (open === next ? null : next))
 
   return (
-    <li className="flex flex-col gap-4 rounded-xl border-2 border-slate-200 p-4">
+    <li className="flex flex-col gap-4 rounded-xl border-2 border-brand-200 p-4">
       <div className="flex items-start gap-3">
         <Thumbnail item={item} />
         <div className="flex min-w-0 flex-1 flex-col gap-2">
@@ -53,7 +54,7 @@ export default function ItemRow({
           type="button"
           onClick={() => toggle('total')}
           aria-expanded={panel === 'total'}
-          className="min-h-14 flex-1 rounded-xl bg-slate-50 px-4 text-left text-slate-700"
+          className="min-h-14 flex-1 rounded-xl bg-brand-50 px-4 text-left font-medium whitespace-nowrap text-brand-900"
         >
           {item.quantity} {item.unit}
         </button>
@@ -114,7 +115,7 @@ export default function ItemRow({
 
 /** A separator above an expanded panel, so it reads as belonging to this item. */
 function Panelled({ children }: { children: React.ReactNode }) {
-  return <div className="flex flex-col gap-3 border-t-2 border-slate-100 pt-4">{children}</div>
+  return <div className="flex flex-col gap-3 border-t-2 border-brand-100 pt-4">{children}</div>
 }
 
 /**
@@ -126,7 +127,7 @@ function Thumbnail({ item }: { item: Item }) {
     return (
       <span
         aria-hidden="true"
-        className="flex size-14 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-2xl"
+        className="flex size-14 shrink-0 items-center justify-center rounded-xl bg-brand-100 text-2xl"
       >
         🧴
       </span>
@@ -137,7 +138,7 @@ function Thumbnail({ item }: { item: Item }) {
       src={itemImageUrl(item.id)}
       alt={item.name}
       loading="lazy"
-      className="size-14 shrink-0 rounded-xl bg-slate-100 object-cover"
+      className="size-14 shrink-0 rounded-xl bg-brand-100 object-cover"
     />
   )
 }
@@ -161,7 +162,7 @@ function StepButton({
       onClick={onClick}
       // size-14 is 3.5rem, and rem is 20px here, so these render at 70px square —
       // well above the tap-target floor and easy to hit one-handed.
-      className="size-14 shrink-0 rounded-xl bg-slate-900 text-3xl leading-none text-white disabled:bg-slate-200 disabled:text-slate-400"
+      className="size-14 shrink-0 rounded-xl bg-brand-700 text-3xl leading-none text-white disabled:bg-slate-200 disabled:text-slate-400"
     >
       {children}
     </button>
@@ -182,15 +183,14 @@ function SmallAction({
       type="button"
       onClick={onClick}
       aria-expanded={expanded}
-      className={`min-h-12 text-slate-600 underline underline-offset-4 ${expanded ? 'font-medium text-slate-900' : ''}`}
+      className={`-mx-2 min-h-12 px-2 text-accent-700 underline underline-offset-4 ${
+        expanded ? 'font-medium text-accent-800' : ''
+      }`}
     >
       {children}
     </button>
   )
 }
-
-const inputClass =
-  'min-h-14 w-full rounded-xl border-2 border-slate-300 px-4 py-3 focus:border-slate-900 focus:outline-none'
 
 function SetTotalForm({
   item,
@@ -233,11 +233,11 @@ function SetTotalForm({
         type="button"
         disabled={!valid}
         onClick={() => onSubmit(quantity, note.trim())}
-        className="min-h-14 rounded-xl bg-slate-900 px-4 font-medium text-white disabled:bg-slate-300 disabled:text-slate-500"
+        className={primaryButtonClass}
       >
         บันทึก
       </button>
-      <button type="button" onClick={onCancel} className="min-h-14 rounded-xl border-2 border-slate-300 px-4">
+      <button type="button" onClick={onCancel} className={secondaryButtonClass}>
         ยกเลิก
       </button>
     </Panelled>
@@ -324,7 +324,7 @@ function PhotoPicker({ item, onPhoto }: { item: Item; onPhoto: (file: File) => P
             e.target.value = ''
           }
         }}
-        className="w-full rounded-xl border-2 border-slate-300 p-3"
+        className="w-full rounded-xl border-2 border-brand-600 p-3"
       />
       {busy && <p aria-live="polite" className="text-slate-600">กำลังอัปโหลดรูป…</p>}
       {failed && <p aria-live="assertive" className="text-amber-900">อัปโหลดรูปไม่สำเร็จ กรุณาลองใหม่</p>}
@@ -400,11 +400,11 @@ function EditForm({
             setBusy(false)
           }
         }}
-        className="min-h-14 rounded-xl bg-slate-900 px-4 font-medium text-white disabled:bg-slate-300 disabled:text-slate-500"
+        className={primaryButtonClass}
       >
         บันทึก
       </button>
-      <button type="button" onClick={onCancel} className="min-h-14 rounded-xl border-2 border-slate-300 px-4">
+      <button type="button" onClick={onCancel} className={secondaryButtonClass}>
         ยกเลิก
       </button>
 
@@ -424,16 +424,16 @@ function EditForm({
                 setBusy(false)
               }
             }}
-            className="min-h-14 rounded-xl bg-red-700 px-4 font-medium text-white disabled:bg-slate-300"
+            className={dangerButtonClass}
           >
             ยืนยันลบ
           </button>
-          <button type="button" onClick={() => setConfirming(false)} className="min-h-14 rounded-xl border-2 border-slate-300 px-4">
+          <button type="button" onClick={() => setConfirming(false)} className={secondaryButtonClass}>
             ไม่ลบ
           </button>
         </div>
       ) : (
-        <button type="button" onClick={() => setConfirming(true)} className="min-h-14 text-red-700 underline underline-offset-4">
+        <button type="button" onClick={() => setConfirming(true)} className="min-h-14 self-start text-red-700 underline underline-offset-4">
           ลบของนี้
         </button>
       )}

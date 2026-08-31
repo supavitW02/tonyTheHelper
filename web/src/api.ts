@@ -70,6 +70,13 @@ export const createHousehold = (name: string) =>
     body: JSON.stringify({ name }),
   })
 
+/** Changes a household's name. Owner only; a member gets 403 and a stranger 404. */
+export const renameHousehold = (householdId: string, name: string) =>
+  request<Household>(`/api/households/${householdId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  })
+
 /** A kind of thing a household keeps in stock. */
 export type Item = {
   id: string

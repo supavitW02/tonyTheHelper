@@ -193,6 +193,33 @@ func (db *DB) CreateHousehold(ctx context.Context, ownerID, name string) (Househ
 	return h, nil
 }
 
+const updateHouseholdName = `
+update households set name = $2, updated_at = now() where id = $1
+returning id, name, owner_id`
+
+// RenameHousehold changes a household's name. Owner only.
+//
+// The ownership check runs first and reuses requireOwner, so an outsider gets ErrNotFound
+// (they must not learn the household exists) while a member who is not the owner gets
+// ErrNotOwner. The name is shared, so the new one is what every member sees.
+func (db *DB) RenameHousehold(ctx context.Context, householdID, ownerID, name string) (Household, error) {
+	if err := db.requireOwner(ctx, householdID, ownerID); err != nil {
+		return Household{}, err
+	}
+
+	var h Household
+	err := db.pool.QueryRow(ctx, updateHouseholdName, householdID, name).Scan(&h.ID, &h.Name, &h.OwnerID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Household{}, ErrNotFound
+	case err != nil:
+		return Household{}, fmt.Errorf("store: rename household: %w", err)
+	}
+
+	h.IsOwner = h.OwnerID == ownerID
+	return h, nil
+}
+
 const selectHouseholdsForUser = `
 select h.id, h.name, h.owner_id
 from households h

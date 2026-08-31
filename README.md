@@ -47,6 +47,7 @@ api/                 Go API; embeds and serves the built web app
   internal/store/    database access and embedded migrations
   static/            the built web app, written here by `vite build` (gitignored)
 web/                 Vite + React LIFF app (Thai UI)
+  public/            the logo, served as the app icon and shown on the first-run screen
 docs/adr/            architecture decision records
 docs/agents/         how coding agents work in this repo
 CONTEXT.md           domain glossary, English and Thai

@@ -4,17 +4,45 @@
   /* IBM Plex Sans Thai carries Thai and Latin in one family, so mixed strings do not
      switch typeface mid-sentence. */
   --font-sans: 'IBM Plex Sans Thai', 'Noto Sans Thai', ui-sans-serif, system-ui, sans-serif;
+
+  /*
+    The palette is sampled from the logo rather than guessed: the greens come from the
+    turtle (#b8d858 highlight, #488828 body, #285818 and #082808 outlines), the blues
+    from its apron (#2878a8), and the warm tones from the house and its roof.
+
+    The important constraint is that the logo's cheerful greens are far too light to sit
+    behind white text — the lime is 1.62:1 and even the mid green only 4.35:1, both under
+    the 4.5:1 floor in ADR-0004. So the bright end of the scale is decorative only, and
+    anything filled uses brand-700 or darker. Measured ratios are noted per token.
+  */
+  --color-brand-50: #f4f9e9; /* panel tint */
+  --color-brand-100: #e6f2cf;
+  --color-brand-200: #cfe6a6; /* card outlines: decorative, not a control boundary */
+  --color-brand-300: #b8d858; /* the logo's lime. Decoration only — 1.62:1 on white */
+  --color-brand-400: #8dbb43;
+  --color-brand-500: #6da531; /* 2.97:1 on white — just misses the 3:1 boundary floor */
+  --color-brand-600: #4f8a26; /* 4.20:1 on white — the lightest usable control border */
+  --color-brand-700: #3d6f1f; /* filled controls: white text at 6.01:1 */
+  --color-brand-800: #2c5518; /* headings: 8.68:1 on white */
+  --color-brand-900: #1d3d10;
+  --color-brand-950: #0d2208; /* body text, from the logo's outline green */
+
+  /* The apron blue, used for anything that behaves like a link or a second choice. */
+  --color-accent-50: #eef6fb;
+  --color-accent-100: #d7e9f4;
+  --color-accent-500: #2878a8; /* the logo's apron */
+  --color-accent-600: #206690;
+  --color-accent-700: #185888; /* 7.53:1 on white */
+  --color-accent-800: #14466c;
 }
 
 /*
-  20px base type, the readability floor for issue #1.
+  20px base type, the readability floor validated in ADR-0004.
 
   Expressed as a percentage of the browser's own default rather than a fixed 20px, so
   someone who has already enlarged their phone's font size keeps that enlargement
   instead of having it overridden. 16px default x 125% = 20px. Every rem-based size in
   the app — type, spacing, tap targets — scales from here.
-
-  These numbers are provisional until issue #12 validates them on a real phone.
 */
 html {
   font-size: 125%;
@@ -24,6 +52,15 @@ body {
   margin: 0;
   font-family: var(--font-sans);
   background-color: var(--color-white);
-  color: var(--color-slate-900);
+  color: var(--color-brand-950);
   -webkit-font-smoothing: antialiased;
+}
+
+/*
+  A modal dialog sits in the browser's top layer, above everything, but the page behind
+  it still scrolls on touch. Locking the body while one is open keeps the form the user
+  is typing into from sliding away under their finger.
+*/
+body:has(dialog[open]) {
+  overflow: hidden;
 }
