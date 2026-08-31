@@ -1111,3 +1111,83 @@ func TestMembersOfListsTheOwnerFirstAndRefusesOutsiders(t *testing.T) {
 		t.Errorf("outsider: error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestRenameHouseholdChangesTheNameForEveryMember(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-ren-owner", "พ่อ")
+	mum := newUser(t, db, "U-ren-mum", "แม่")
+	invite, _ := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if _, err := db.AcceptInvite(ctx, invite.Token, mum.ID, now); err != nil {
+		t.Fatalf("AcceptInvite: %v", err)
+	}
+
+	renamed, err := db.RenameHousehold(ctx, h.ID, dad.ID, "บ้านสวน")
+	if err != nil {
+		t.Fatalf("RenameHousehold: %v", err)
+	}
+	if renamed.Name != "บ้านสวน" {
+		t.Errorf("Name = %q, want บ้านสวน", renamed.Name)
+	}
+	if !renamed.IsOwner {
+		t.Error("the owner who renamed it is no longer marked as owner")
+	}
+
+	// The point of renaming: everyone sees it, not just the person who typed it.
+	seen, err := db.HouseholdsForUser(ctx, mum.ID)
+	if err != nil {
+		t.Fatalf("HouseholdsForUser: %v", err)
+	}
+	if len(seen) != 1 || seen[0].Name != "บ้านสวน" {
+		t.Errorf("member sees %+v, want one household named บ้านสวน", seen)
+	}
+	if seen[0].IsOwner {
+		t.Error("a member is reported as owner")
+	}
+}
+
+func TestRenameHouseholdRefusesAMemberWhoIsNotTheOwner(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-ren2-owner", "พ่อ")
+	mum := newUser(t, db, "U-ren2-mum", "แม่")
+	invite, _ := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if _, err := db.AcceptInvite(ctx, invite.Token, mum.ID, now); err != nil {
+		t.Fatalf("AcceptInvite: %v", err)
+	}
+
+	if _, err := db.RenameHousehold(ctx, h.ID, mum.ID, "บ้านของแม่"); !errors.Is(err, store.ErrNotOwner) {
+		t.Errorf("error = %v, want ErrNotOwner", err)
+	}
+
+	// And the refusal must not have written anything.
+	seen, err := db.HouseholdsForUser(ctx, dad.ID)
+	if err != nil {
+		t.Fatalf("HouseholdsForUser: %v", err)
+	}
+	if seen[0].Name != h.Name {
+		t.Errorf("name = %q, want it left as %q", seen[0].Name, h.Name)
+	}
+}
+
+func TestRenameHouseholdHidesTheHouseholdFromAnOutsider(t *testing.T) {
+	db := open(t)
+	_, h := household(t, db, "U-ren3-owner", "พ่อ")
+	stranger := newUser(t, db, "U-ren3-stranger", "คนแปลกหน้า")
+
+	// ErrNotFound, not ErrNotOwner: an outsider must not learn the household exists.
+	if _, err := db.RenameHousehold(context.Background(), h.ID, stranger.ID, "บ้านฉัน"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRenameHouseholdTreatsAMalformedIDAsNotFound(t *testing.T) {
+	db := open(t)
+	u := newUser(t, db, "U-ren4", "พ่อ")
+
+	if _, err := db.RenameHousehold(context.Background(), "not-a-uuid", u.ID, "บ้าน"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}

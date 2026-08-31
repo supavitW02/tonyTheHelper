@@ -66,15 +66,8 @@ func (d Deps) createHousehold(w http.ResponseWriter, r *http.Request, user store
 		return
 	}
 
-	name := strings.TrimSpace(body.Name)
-	switch {
-	case name == "":
-		writeError(w, http.StatusBadRequest, "household name is required")
-		return
-	// Counted in runes, not bytes: a Thai name is three bytes per character and a byte
-	// limit would reject a perfectly short name.
-	case utf8.RuneCountInString(name) > maxHouseholdNameLen:
-		writeError(w, http.StatusBadRequest, "household name is too long")
+	name, ok := householdName(w, body.Name)
+	if !ok {
 		return
 	}
 
@@ -86,4 +79,51 @@ func (d Deps) createHousehold(w http.ResponseWriter, r *http.Request, user store
 	}
 
 	writeJSON(w, http.StatusCreated, household)
+}
+
+// householdName trims and validates a submitted name, writing the rejection itself and
+// reporting whether the caller should carry on. Shared by creating and renaming, so the
+// two can never drift into accepting different names.
+func householdName(w http.ResponseWriter, submitted string) (string, bool) {
+	name := strings.TrimSpace(submitted)
+	switch {
+	case name == "":
+		writeError(w, http.StatusBadRequest, "household name is required")
+		return "", false
+	// Counted in runes, not bytes: a Thai name is three bytes per character and a byte
+	// limit would reject a perfectly short name.
+	case utf8.RuneCountInString(name) > maxHouseholdNameLen:
+		writeError(w, http.StatusBadRequest, "household name is too long")
+		return "", false
+	}
+	return name, true
+}
+
+type renameHouseholdRequest struct {
+	Name string `json:"name"`
+}
+
+// renameHousehold changes a household's name after the fact.
+//
+// Owner only, and the store decides that: a stranger gets 404 rather than 403 so the URL
+// cannot be used to discover which household ids exist.
+func (d Deps) renameHousehold(w http.ResponseWriter, r *http.Request, user store.User) {
+	var body renameHouseholdRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed request body")
+		return
+	}
+
+	name, ok := householdName(w, body.Name)
+	if !ok {
+		return
+	}
+
+	household, err := d.Households.RenameHousehold(r.Context(), r.PathValue("householdId"), user.ID, name)
+	if err != nil {
+		d.householdError(w, err, "rename household")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, household)
 }

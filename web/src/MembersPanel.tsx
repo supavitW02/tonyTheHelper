@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { createInvite, getMembers, removeMember, type Household, type Member } from './api'
+import { dangerButtonClass, Notice, primaryButtonClass, secondaryButtonClass } from './ui'
 
 /**
  * Who is in the household, and — for the owner — how to change that.
@@ -8,14 +9,28 @@ import { createInvite, getMembers, removeMember, type Household, type Member } f
  * The owner never sees or types a token: they get a link and send it in the LINE chat
  * they already use. Nothing is read aloud over the phone.
  */
-export default function MembersPanel({ household, meId }: { household: Household; meId: string }) {
+export default function MembersPanel({
+  household,
+  meId,
+  active,
+}: {
+  household: Household
+  meId: string
+  /** Whether this tab is the one being looked at. */
+  active: boolean
+}) {
   const [members, setMembers] = useState<Member[] | null>(null)
   const [inviteUrl, setInviteUrl] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // The panel is mounted from the start so the tab's aria-controls has a target, but the
+  // request waits until someone opens the tab — most opens of the app never do, and this
+  // runs on a phone that may be on mobile data.
   useEffect(() => {
+    if (!active || members !== null) return
+
     let cancelled = false
     getMembers(household.id)
       .then(({ members }) => {
@@ -29,7 +44,7 @@ export default function MembersPanel({ household, meId }: { household: Household
     return () => {
       cancelled = true
     }
-  }, [household.id])
+  }, [active, household.id, members])
 
   async function invite() {
     setBusy(true)
@@ -61,29 +76,28 @@ export default function MembersPanel({ household, meId }: { household: Household
   }
 
   return (
-    <section className="flex flex-col gap-4 rounded-xl bg-slate-50 p-5">
-      <h3 className="text-xl font-semibold">สมาชิกในบ้าน</h3>
+    <section className="flex flex-col gap-5">
+      {error && <Notice>{error}</Notice>}
 
-      {error && (
-        <p aria-live="assertive" className="flex min-h-12 items-center gap-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-900">
-          <span aria-hidden="true" className="text-2xl leading-none">
-            ✕
-          </span>
-          <span>{error}</span>
-        </p>
-      )}
-
-      {members === null && <p className="text-slate-600">กำลังโหลด…</p>}
+      {members === null && !error && <Notice tone="info">กำลังโหลดรายชื่อ…</Notice>}
 
       {members && (
         <ul className="flex flex-col gap-3">
           {members.map((m) => (
-            <li key={m.userId} className="flex flex-col gap-2">
+            <li key={m.userId} className="flex flex-col gap-2 rounded-xl border-2 border-brand-200 p-4">
               <div className="flex items-center gap-3">
                 {m.pictureUrl ? (
-                  <img src={m.pictureUrl} alt="" className="size-12 shrink-0 rounded-full object-cover" referrerPolicy="no-referrer" />
+                  <img
+                    src={m.pictureUrl}
+                    alt=""
+                    className="size-12 shrink-0 rounded-full object-cover"
+                    referrerPolicy="no-referrer"
+                  />
                 ) : (
-                  <span aria-hidden="true" className="flex size-12 shrink-0 items-center justify-center rounded-full bg-slate-200 text-xl">
+                  <span
+                    aria-hidden="true"
+                    className="flex size-12 shrink-0 items-center justify-center rounded-full bg-brand-100 text-xl"
+                  >
                     👤
                   </span>
                 )}
@@ -103,12 +117,7 @@ export default function MembersPanel({ household, meId }: { household: Household
 
       {household.isOwner && (
         <div className="flex flex-col gap-3">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={invite}
-            className="min-h-14 rounded-xl bg-slate-900 px-4 font-medium text-white disabled:bg-slate-300 disabled:text-slate-500"
-          >
+          <button type="button" disabled={busy} onClick={invite} className={primaryButtonClass}>
             {inviteUrl ? 'สร้างลิงก์ใหม่' : 'เชิญสมาชิก'}
           </button>
 
@@ -116,7 +125,7 @@ export default function MembersPanel({ household, meId }: { household: Household
             <div className="flex flex-col gap-2">
               <p className="text-slate-600">ส่งลิงก์นี้ให้คนที่ต้องการเชิญทาง LINE (ใช้ได้ 7 วัน)</p>
               {/* Readable and selectable, so it works even if the copy button does not. */}
-              <p className="rounded-xl border-2 border-slate-300 bg-white p-3 break-all select-all">{inviteUrl}</p>
+              <p className="rounded-xl border-2 border-brand-200 bg-brand-50 p-3 break-all select-all">{inviteUrl}</p>
               <button
                 type="button"
                 onClick={async () => {
@@ -128,7 +137,7 @@ export default function MembersPanel({ household, meId }: { household: Household
                     setError('คัดลอกไม่สำเร็จ กรุณากดค้างที่ลิงก์เพื่อคัดลอก')
                   }
                 }}
-                className="min-h-14 rounded-xl border-2 border-slate-300 px-4"
+                className={secondaryButtonClass}
               >
                 {copied ? 'คัดลอกแล้ว ✓' : 'คัดลอกลิงก์'}
               </button>
@@ -146,7 +155,11 @@ function RemoveButton({ name, disabled, onConfirm }: { name: string; disabled: b
 
   if (!confirming) {
     return (
-      <button type="button" onClick={() => setConfirming(true)} className="min-h-12 self-start text-red-700 underline underline-offset-4">
+      <button
+        type="button"
+        onClick={() => setConfirming(true)}
+        className="min-h-12 self-start text-red-700 underline underline-offset-4"
+      >
         นำออกจากบ้าน
       </button>
     )
@@ -154,15 +167,10 @@ function RemoveButton({ name, disabled, onConfirm }: { name: string; disabled: b
   return (
     <div className="flex flex-col gap-2 rounded-xl bg-amber-50 p-3">
       <p className="text-amber-900">นำ “{name}” ออกจากบ้าน? ประวัติที่เคยทำไว้จะยังอยู่</p>
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={onConfirm}
-        className="min-h-14 rounded-xl bg-red-700 px-4 font-medium text-white disabled:bg-slate-300"
-      >
+      <button type="button" disabled={disabled} onClick={onConfirm} className={dangerButtonClass}>
         ยืนยันนำออก
       </button>
-      <button type="button" onClick={() => setConfirming(false)} className="min-h-14 rounded-xl border-2 border-slate-300 px-4">
+      <button type="button" onClick={() => setConfirming(false)} className={secondaryButtonClass}>
         ไม่นำออก
       </button>
     </div>

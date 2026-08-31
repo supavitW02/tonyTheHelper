@@ -115,6 +115,26 @@ func (f *fakeHouseholds) CreateHousehold(_ context.Context, ownerID, name string
 	return h, nil
 }
 
+func (f *fakeHouseholds) RenameHousehold(_ context.Context, householdID, ownerID, name string) (store.Household, error) {
+	if f.err != nil {
+		return store.Household{}, f.err
+	}
+	if err := f.requireOwner(householdID, ownerID); err != nil {
+		return store.Household{}, err
+	}
+	f.names[householdID] = name
+	// One row changes in the real store, but this fake keeps a copy per member, so every
+	// copy has to move together or a member would still read the old name.
+	for user := range f.byUser {
+		for i := range f.byUser[user] {
+			if f.byUser[user][i].ID == householdID {
+				f.byUser[user][i].Name = name
+			}
+		}
+	}
+	return store.Household{ID: householdID, Name: name, OwnerID: ownerID, IsOwner: true}, nil
+}
+
 func (f *fakeHouseholds) HouseholdsForUser(_ context.Context, userID string) ([]store.Household, error) {
 	if f.err != nil {
 		return nil, f.err
@@ -950,6 +970,7 @@ func TestHouseholdEndpointsRequireASession(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/households", ""},
 		{http.MethodPost, "/api/households", `{"name":"บ้านเรา"}`},
+		{http.MethodPatch, "/api/households/household-1", `{"name":"บ้านเรา"}`},
 	}
 	for _, c := range cases {
 		var req *http.Request
@@ -1782,5 +1803,123 @@ func TestMemberAndInviteEndpointsRequireASession(t *testing.T) {
 		if res := h.do(httptest.NewRequest(c.method, c.path, nil)); res.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, res.StatusCode, http.StatusUnauthorized)
 		}
+	}
+}
+
+// --- renaming a household -------------------------------------------------------
+
+func TestTheOwnerCanRenameTheHousehold(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+
+	res := h.signedIn(t, http.MethodPatch, "/api/households/"+id, `{"name":"บ้านสวน"}`)
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", res.StatusCode, http.StatusOK, body(t, res))
+	}
+	var got store.Household
+	if err := json.Unmarshal([]byte(body(t, res)), &got); err != nil {
+		t.Fatalf("decode household: %v", err)
+	}
+	if got.Name != "บ้านสวน" {
+		t.Errorf("name = %q, want บ้านสวน", got.Name)
+	}
+
+	// The list is what the app reads on every open, so the new name has to be there too.
+	listed := decodeHouseholds(t, h.signedIn(t, http.MethodGet, "/api/households", ""))
+	if len(listed.Households) != 1 || listed.Households[0].Name != "บ้านสวน" {
+		t.Errorf("list = %+v, want one household named บ้านสวน", listed.Households)
+	}
+}
+
+func TestRenamingTrimsSurroundingWhitespace(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+
+	res := h.signedIn(t, http.MethodPatch, "/api/households/"+id, `{"name":"  บ้านสวน  "}`)
+
+	var got store.Household
+	if err := json.Unmarshal([]byte(body(t, res)), &got); err != nil {
+		t.Fatalf("decode household: %v", err)
+	}
+	if got.Name != "บ้านสวน" {
+		t.Errorf("name = %q, want it trimmed to บ้านสวน", got.Name)
+	}
+}
+
+func TestRenamingRejectsAnEmptyName(t *testing.T) {
+	for _, name := range []string{"", "   "} {
+		h := newHarness(t)
+		id := h.withHousehold(t)
+
+		res := h.signedIn(t, http.MethodPatch, "/api/households/"+id, `{"name":"`+name+`"}`)
+
+		if res.StatusCode != http.StatusBadRequest {
+			t.Errorf("name %q: status = %d, want %d", name, res.StatusCode, http.StatusBadRequest)
+		}
+	}
+}
+
+func TestRenamingRejectsAnOverlongName(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+
+	res := h.signedIn(t, http.MethodPatch, "/api/households/"+id, `{"name":"`+strings.Repeat("ก", 61)+`"}`)
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+	}
+}
+
+// A 60-character Thai name is 180 bytes, so a byte-based limit would reject a name that
+// is well within range. Same guard as creating a household.
+func TestRenamingCountsNameLengthInCharactersNotBytes(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+
+	res := h.signedIn(t, http.MethodPatch, "/api/households/"+id, `{"name":"`+strings.Repeat("ก", 60)+`"}`)
+
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d; body = %s", res.StatusCode, http.StatusOK, body(t, res))
+	}
+}
+
+func TestAMemberCannotRenameTheHousehold(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+	token, _ := h.inviteToken(t, id)
+	mum := h.asUser(t, "user-mum", "แม่")
+	if res := h.doAs(t, mum, http.MethodPost, "/api/invites/"+token+"/accept", ""); res.StatusCode != http.StatusOK {
+		t.Fatalf("accept: status = %d", res.StatusCode)
+	}
+
+	res := h.doAs(t, mum, http.MethodPatch, "/api/households/"+id, `{"name":"บ้านของแม่"}`)
+
+	if res.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d; body = %s", res.StatusCode, http.StatusForbidden, body(t, res))
+	}
+}
+
+func TestAnOutsiderRenamingAHouseholdLearnsNothing(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+	stranger := h.asUser(t, "user-stranger", "คนแปลกหน้า")
+
+	res := h.doAs(t, stranger, http.MethodPatch, "/api/households/"+id, `{"name":"บ้านฉัน"}`)
+
+	// 404, not 403: a stranger must not be told the household is there to be renamed.
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestRenamingRejectsAMalformedBody(t *testing.T) {
+	h := newHarness(t)
+	id := h.withHousehold(t)
+
+	res := h.signedIn(t, http.MethodPatch, "/api/households/"+id, `{"name":`)
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
 	}
 }

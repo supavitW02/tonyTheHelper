@@ -1,11 +1,12 @@
 import { useState } from 'react'
 
 import { createHousehold, type Household } from './api'
+import { Field, inputClass, Notice, primaryButtonClass, secondaryButtonClass } from './ui'
 
 /**
  * Shown to someone who belongs to no household yet. It is the first thing a new user
  * sees after signing in, so it explains what a household is rather than just asking
- * for a name.
+ * for a name — and it is the one screen with room for the logo.
  */
 export default function CreateHousehold({
   onCreated,
@@ -38,15 +39,13 @@ export default function CreateHousehold({
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <h2 className="text-2xl font-semibold">สร้างบ้านของคุณ</h2>
+      <div className="flex flex-col items-center gap-3 text-center">
+        <img src="/tony-logo.png" alt="" width={192} height={192} className="size-48" />
+        <h2 className="text-2xl font-semibold text-brand-800">สร้างบ้านของคุณ</h2>
         <p className="text-slate-600">บ้านคือที่เก็บรายการของใช้ที่ทุกคนในครอบครัวใช้ร่วมกัน</p>
       </div>
 
-      <div className="flex flex-col gap-2">
-        <label htmlFor="household-name" className="font-medium">
-          ชื่อบ้าน
-        </label>
+      <Field label="ชื่อบ้าน" htmlFor="household-name">
         <input
           id="household-name"
           type="text"
@@ -55,29 +54,18 @@ export default function CreateHousehold({
           maxLength={60}
           autoComplete="off"
           placeholder="เช่น บ้านเรา"
-          className="min-h-14 rounded-xl border-2 border-slate-300 px-4 py-3 focus:border-slate-900 focus:outline-none"
+          className={inputClass}
         />
-      </div>
+      </Field>
 
-      {error && (
-        <p aria-live="assertive" className="flex min-h-12 items-center gap-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-900">
-          <span aria-hidden="true" className="text-2xl leading-none">
-            ✕
-          </span>
-          <span>{error}</span>
-        </p>
-      )}
+      {error && <Notice>{error}</Notice>}
 
-      <button
-        type="submit"
-        disabled={!trimmed || saving}
-        className="min-h-14 rounded-xl bg-slate-900 px-4 py-3 font-medium text-white disabled:bg-slate-300 disabled:text-slate-500"
-      >
+      <button type="submit" disabled={!trimmed || saving} className={primaryButtonClass}>
         {saving ? 'กำลังสร้าง…' : 'สร้างบ้าน'}
       </button>
 
       {onCancel && (
-        <button type="button" onClick={onCancel} disabled={saving} className="min-h-14 rounded-xl border-2 border-slate-300 px-4 py-3">
+        <button type="button" onClick={onCancel} disabled={saving} className={secondaryButtonClass}>
           ยกเลิก
         </button>
       )}
