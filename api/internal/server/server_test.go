@@ -26,8 +26,9 @@ var testSecret = []byte("a-test-secret-that-is-long-enough-32")
 // anyone having run `vite build` first.
 func assets() fstest.MapFS {
 	return fstest.MapFS{
-		"index.html":           {Data: []byte("<!doctype html><title>ของใช้ในบ้าน</title>")},
+		"index.html":           {Data: []byte("<!doctype html><title>Tony The Helper</title>")},
 		"assets/app-abc123.js": {Data: []byte("console.log('app')")},
+		"manifest.webmanifest": {Data: []byte(`{"name":"Tony The Helper"}`)},
 	}
 }
 
@@ -1921,5 +1922,19 @@ func TestRenamingRejectsAMalformedBody(t *testing.T) {
 
 	if res.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+	}
+}
+
+// Go's own MIME table has no entry for .webmanifest, so without a registration the file
+// is content-sniffed and served as text/plain, which some browsers refuse to parse as a
+// manifest. Serving it correctly is what makes the app installable.
+func TestManifestIsServedAsAManifest(t *testing.T) {
+	res := newHarness(t).get("/manifest.webmanifest")
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	if got := res.Header.Get("Content-Type"); !strings.Contains(got, "application/manifest+json") {
+		t.Errorf("Content-Type = %q, want it to contain application/manifest+json", got)
 	}
 }

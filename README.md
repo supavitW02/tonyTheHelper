@@ -47,7 +47,7 @@ api/                 Go API; embeds and serves the built web app
   internal/store/    database access and embedded migrations
   static/            the built web app, written here by `vite build` (gitignored)
 web/                 Vite + React LIFF app (Thai UI)
-  public/            the logo, served as the app icon and shown on the first-run screen
+  public/            icons, the web app manifest, and the service worker
 docs/adr/            architecture decision records
 docs/agents/         how coding agents work in this repo
 CONTEXT.md           domain glossary, English and Thai
@@ -140,6 +140,7 @@ name for code and its canonical Thai name for the UI. Use those words. Don't inv
 | [0002](docs/adr/0002-line-identity-is-the-only-identity.md) | LINE identity is the only identity |
 | [0003](docs/adr/0003-the-frontend-ships-inside-the-go-binary.md) | The frontend ships inside the Go binary |
 | [0004](docs/adr/0004-the-accessibility-floor.md) | The accessibility floor: 20px text, 4.5:1 contrast, 48px targets |
+| [0005](docs/adr/0005-installable-without-caching-the-app-shell.md) | Installable to the home screen, without caching the app shell |
 
 If your change contradicts an ADR, say so explicitly rather than quietly working around it.
 

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"path"
 	"strings"
@@ -72,6 +73,14 @@ type Deps struct {
 	Items      Items
 	Storage    Storage
 	Sessions   *session.Manager
+}
+
+// Go's built-in MIME table has no entry for .webmanifest, so the file would be
+// content-sniffed and served as text/plain — which some browsers refuse to parse as a
+// manifest, quietly making the app non-installable. Registering the type keeps the
+// conventional filename instead of renaming the file to .json to dodge the problem.
+func init() {
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
 }
 
 func New(deps Deps) http.Handler {
