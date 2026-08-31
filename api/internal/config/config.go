@@ -19,6 +19,12 @@ type Config struct {
 	LiffID        string // public; served to the frontend at runtime
 	SessionSecret []byte
 	Port          string
+
+	// Supabase Storage holds item photos. The service role key bypasses RLS, so it is
+	// only ever read here and never sent to the browser.
+	SupabaseURL        string
+	SupabaseServiceKey string
+	SupabaseBucket     string
 }
 
 // Load reads the environment. It reports every problem at once: fixing one missing
@@ -30,6 +36,10 @@ func Load() (Config, error) {
 		LiffID:        os.Getenv("LINE_LIFF_ID"),
 		SessionSecret: []byte(os.Getenv("SESSION_SECRET")),
 		Port:          envOr("PORT", "8080"),
+
+		SupabaseURL:        os.Getenv("SUPABASE_URL"),
+		SupabaseServiceKey: os.Getenv("SUPABASE_SERVICE_ROLE_KEY"),
+		SupabaseBucket:     envOr("SUPABASE_STORAGE_BUCKET", "item-images"),
 	}
 
 	var problems []string
@@ -47,6 +57,13 @@ func Load() (Config, error) {
 		problems = append(problems, "SESSION_SECRET is not set")
 	case len(cfg.SessionSecret) < minSecretLen:
 		problems = append(problems, fmt.Sprintf("SESSION_SECRET is %d bytes, need at least %d", len(cfg.SessionSecret), minSecretLen))
+	}
+
+	if cfg.SupabaseURL == "" {
+		problems = append(problems, "SUPABASE_URL is not set")
+	}
+	if cfg.SupabaseServiceKey == "" {
+		problems = append(problems, "SUPABASE_SERVICE_ROLE_KEY is not set")
 	}
 
 	if len(problems) > 0 {

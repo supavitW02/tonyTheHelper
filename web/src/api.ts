@@ -1,3 +1,5 @@
+import { resizeImage } from './resizeImage'
+
 /** The signed-in user, as the API describes them. */
 export type User = {
   id: string
@@ -79,6 +81,8 @@ export type Item = {
   lowStockThreshold?: number
   /** Derived by the server, so the UI never disagrees with the list ordering. */
   isLow: boolean
+  /** Whether a photo exists. The storage path is deliberately not exposed. */
+  hasImage: boolean
 }
 
 /** The writable half of an item, shared by add and edit. */
@@ -136,3 +140,36 @@ export const adjustQuantity = (itemId: string, change: { delta?: number; quantit
     method: 'POST',
     body: JSON.stringify(change),
   })
+
+/** The URL an item's photo is served from. Redirects to a freshly signed storage URL. */
+export const itemImageUrl = (itemId: string) => `/api/items/${itemId}/image`
+
+/**
+ * Uploads a photo for an item.
+ *
+ * Three steps, deliberately: the bytes go straight from the phone to object storage, so a
+ * 256MB machine in Singapore never proxies a photo, and the item only claims to have an
+ * image once the transfer has actually succeeded.
+ */
+export async function uploadItemPhoto(itemId: string, file: File): Promise<Item> {
+  const blob = await resizeImage(file)
+
+  const { uploadUrl, path } = await request<{ uploadUrl: string; path: string }>(
+    `/api/items/${itemId}/image`,
+    { method: 'POST' },
+  )
+
+  // No custom headers: anything beyond a simple Content-Type would turn this into a
+  // CORS preflight against storage.
+  const upload = await fetch(uploadUrl, {
+    method: 'PUT',
+    body: blob,
+    headers: { 'Content-Type': 'image/jpeg' },
+  })
+  if (!upload.ok) throw new ApiError(upload.status, 'photo upload failed')
+
+  return request<Item>(`/api/items/${itemId}/image`, {
+    method: 'PUT',
+    body: JSON.stringify({ path }),
+  })
+}

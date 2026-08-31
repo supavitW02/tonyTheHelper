@@ -5,6 +5,7 @@ import {
   deleteItem,
   getItems,
   updateItem,
+  uploadItemPhoto,
   type Household,
   type Item,
   type User,
@@ -127,6 +128,10 @@ export default function HouseholdScreen({ household, user }: { household: Househ
                 // Re-sorting matters: editing a threshold can make an item low, and low
                 // items belong at the top of the list.
                 setItems((current) => sortItems((current ?? []).map((i) => (i.id === saved.id ? saved : i))))
+              }}
+              onPhoto={async (file) => {
+                const saved = await uploadItemPhoto(item.id, file)
+                setItems((current) => (current ?? []).map((i) => (i.id === saved.id ? saved : i)))
               }}
               onDelete={async () => {
                 await deleteItem(item.id)

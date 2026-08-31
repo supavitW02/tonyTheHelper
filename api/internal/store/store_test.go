@@ -813,3 +813,81 @@ func TestLowItemsSortToTheTop(t *testing.T) {
 		t.Errorf("first item is %q, want the low one", items[0].Name)
 	}
 }
+
+// --- item photos ----------------------------------------------------------------
+
+func TestSetItemImageMarksTheItemAsHavingOne(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-img", "พ่อ")
+	item, err := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	if err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+	if item.HasImage {
+		t.Error("a new item claims to have an image")
+	}
+
+	updated, err := db.SetItemImage(ctx, item.ID, u.ID, "items/"+item.ID+".jpg")
+	if err != nil {
+		t.Fatalf("SetItemImage: %v", err)
+	}
+	if !updated.HasImage {
+		t.Error("HasImage is false after setting the image")
+	}
+
+	path, err := db.ItemImagePath(ctx, item.ID, u.ID)
+	if err != nil {
+		t.Fatalf("ItemImagePath: %v", err)
+	}
+	if path != "items/"+item.ID+".jpg" {
+		t.Errorf("path = %q, want the item's own path", path)
+	}
+}
+
+// The path is never exposed to the browser, but it must not leak to another household
+// through the API either.
+func TestItemImagePathRefusesANonMember(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	owner, h := household(t, db, "U-img-owner", "เจ้าของ")
+	outsider := newUser(t, db, "U-img-outsider", "คนนอก")
+	item, _ := db.CreateItem(ctx, h.ID, owner.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	if _, err := db.SetItemImage(ctx, item.ID, owner.ID, "items/"+item.ID+".jpg"); err != nil {
+		t.Fatalf("SetItemImage: %v", err)
+	}
+
+	if _, err := db.ItemImagePath(ctx, item.ID, outsider.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+	if err := db.ItemAccessible(ctx, item.ID, outsider.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("ItemAccessible error = %v, want ErrNotFound", err)
+	}
+}
+
+// An item with no photo has no path — that is how the image route knows to 404 rather
+// than redirecting to an object that was never uploaded.
+func TestItemImagePathIsNotFoundWithoutAPhoto(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-img-none", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+
+	if _, err := db.ItemImagePath(ctx, item.ID, u.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestADeletedItemIsNoLongerAccessible(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-img-deleted", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	if err := db.DeleteItem(ctx, item.ID, u.ID); err != nil {
+		t.Fatalf("DeleteItem: %v", err)
+	}
+
+	if err := db.ItemAccessible(ctx, item.ID, u.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
