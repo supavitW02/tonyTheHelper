@@ -1449,3 +1449,117 @@ func TestItemsWithHistoryListsOnlyItemsThatHaveChanged(t *testing.T) {
 		}
 	}
 }
+
+// --- icons ------------------------------------------------------------------------
+
+func TestAnItemCanBeCreatedWithAnIcon(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-icon-create", "พ่อ")
+
+	item, err := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด", Icon: "🧴"})
+	if err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+	if item.Icon != "🧴" {
+		t.Errorf("Icon = %q, want 🧴", item.Icon)
+	}
+
+	// ...and it survives the read path the list uses.
+	items, err := db.ItemsForHousehold(ctx, h.ID, u.ID)
+	if err != nil {
+		t.Fatalf("ItemsForHousehold: %v", err)
+	}
+	if len(items) != 1 || items[0].Icon != "🧴" {
+		t.Errorf("listed item = %+v, want icon 🧴", items)
+	}
+}
+
+func TestAnItemWithoutAnIconHasNone(t *testing.T) {
+	db := open(t)
+	u, h := household(t, db, "U-icon-none", "พ่อ")
+
+	item, err := db.CreateItem(context.Background(), h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	if err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+	if item.Icon != "" {
+		t.Errorf("Icon = %q, want empty", item.Icon)
+	}
+}
+
+func TestEditingCanSetAndClearAnIcon(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-icon-edit", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+
+	set, err := db.UpdateItem(ctx, item.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด", Icon: "🍚"})
+	if err != nil {
+		t.Fatalf("UpdateItem set: %v", err)
+	}
+	if set.Icon != "🍚" {
+		t.Errorf("Icon = %q, want 🍚", set.Icon)
+	}
+
+	// An empty icon is how one is removed, not "leave it alone".
+	cleared, err := db.UpdateItem(ctx, item.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	if err != nil {
+		t.Fatalf("UpdateItem clear: %v", err)
+	}
+	if cleared.Icon != "" {
+		t.Errorf("Icon = %q after clearing, want empty", cleared.Icon)
+	}
+}
+
+// Every read path returns the whole item, so the icon has to come back from the ones that
+// are not obviously "reads" too — otherwise the row loses its picture the moment somebody
+// taps plus.
+func TestAnIconSurvivesAQuantityChangeAndAPhotoUpload(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-icon-paths", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด", Icon: "🧴"})
+
+	one := 1
+	adjusted, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Delta: &one})
+	if err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+	if adjusted.Icon != "🧴" {
+		t.Errorf("after a quantity change Icon = %q, want 🧴", adjusted.Icon)
+	}
+
+	// A no-op change takes a different branch, and returns the item too.
+	zero := 1
+	noop, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Absolute: &zero})
+	if err != nil {
+		t.Fatalf("AdjustQuantity no-op: %v", err)
+	}
+	if noop.Icon != "🧴" {
+		t.Errorf("after a no-op change Icon = %q, want 🧴", noop.Icon)
+	}
+
+	withPhoto, err := db.SetItemImage(ctx, item.ID, u.ID, "items/"+item.ID+"/photo.jpg")
+	if err != nil {
+		t.Fatalf("SetItemImage: %v", err)
+	}
+	if withPhoto.Icon != "🧴" || !withPhoto.HasImage {
+		t.Errorf("after a photo upload = %+v, want the icon kept and hasImage true", withPhoto)
+	}
+}
+
+func TestAMultiCodePointIconRoundTrips(t *testing.T) {
+	db := open(t)
+	u, h := household(t, db, "U-icon-zwj", "พ่อ")
+
+	// A joined emoji is several code points; storing it must not mangle it.
+	item, err := db.CreateItem(context.Background(), h.ID, u.ID,
+		store.ItemInput{Name: "ของใช้", Unit: "ชิ้น", Icon: "🧑‍🍳"})
+	if err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+	if item.Icon != "🧑‍🍳" {
+		t.Errorf("Icon = %q, want the joined emoji back unchanged", item.Icon)
+	}
+}

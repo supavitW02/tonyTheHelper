@@ -90,6 +90,8 @@ export type Item = {
   isLow: boolean
   /** Whether a photo exists. The storage path is deliberately not exposed. */
   hasImage: boolean
+  /** A symbol chosen instead of a photo. A photo, if there is one, wins. */
+  icon?: string
 }
 
 /** The writable half of an item, shared by add and edit. */
@@ -98,6 +100,8 @@ export type ItemInput = {
   unit: string
   description?: string
   lowStockThreshold?: number | null
+  /** Empty clears any icon the item had. */
+  icon?: string
 }
 
 /** One recorded change to an item's quantity, with the person who made it. */

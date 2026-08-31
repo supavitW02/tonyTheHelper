@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { getMovements, itemImageUrl, type Item, type ItemInput, type Movement } from './api'
+import IconPicker from './IconPicker'
 import { dangerButtonClass, inputClass, primaryButtonClass, secondaryButtonClass } from './ui'
 
 type Panel = null | 'total' | 'history' | 'edit' | 'photo'
@@ -131,12 +132,16 @@ function Panelled({ children }: { children: React.ReactNode }) {
 function Thumbnail({ item }: { item: Item }) {
   const [state, setState] = useState<'loading' | 'loaded' | 'failed'>('loading')
   const waiting = item.hasImage && state === 'loading'
+  // The item's own icon takes the stand-in's place, which is all the integration the
+  // icons need: a photo still wins when there is one, the icon shows while that photo is
+  // arriving and if it never does, and an item with neither keeps the generic bottle.
+  const standIn = item.icon || '🧴'
 
   return (
     <span className="relative flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-brand-100">
       {state !== 'loaded' && (
         <span aria-hidden="true" className={`text-2xl ${waiting ? 'animate-pulse' : ''}`}>
-          🧴
+          {standIn}
         </span>
       )}
       {item.hasImage && state !== 'failed' && (
@@ -368,6 +373,7 @@ function EditForm({
   const [unit, setUnit] = useState(item.unit)
   const [description, setDescription] = useState(item.description ?? '')
   const [threshold, setThreshold] = useState(item.lowStockThreshold?.toString() ?? '')
+  const [icon, setIcon] = useState(item.icon ?? '')
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
 
@@ -404,6 +410,8 @@ function EditForm({
         className={inputClass}
       />
 
+      <IconPicker value={icon} onChange={setIcon} />
+
       <button
         type="button"
         disabled={!ready}
@@ -416,6 +424,7 @@ function EditForm({
               description: description.trim() || undefined,
               // An empty field means "never warn me", which the API expects as null.
               lowStockThreshold: threshold.trim() === '' ? null : Number(threshold),
+              icon,
             })
           } finally {
             setBusy(false)

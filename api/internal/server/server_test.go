@@ -344,7 +344,7 @@ func (f *fakeItems) CreateItem(_ context.Context, householdID, userID string, in
 	item := store.Item{
 		ID: fmt.Sprintf("item-%d", f.nextID), Name: in.Name, Unit: in.Unit,
 		Description: in.Description, LowStockThreshold: in.LowStockThreshold,
-		IsLow: lowFor(in.LowStockThreshold, 0),
+		IsLow: lowFor(in.LowStockThreshold, 0), Icon: in.Icon,
 	}
 	f.byHousehold[householdID] = append(f.byHousehold[householdID], item)
 	f.itemHousehold[item.ID] = householdID
@@ -431,6 +431,7 @@ func (f *fakeItems) UpdateItem(_ context.Context, itemID, userID string, in stor
 	item.Description = in.Description
 	item.LowStockThreshold = in.LowStockThreshold
 	item.IsLow = lowFor(in.LowStockThreshold, item.Quantity)
+	item.Icon = in.Icon
 	return *item, nil
 }
 
@@ -2281,5 +2282,96 @@ func TestAnItemsHistoryOverHTTPIsCapped(t *testing.T) {
 	}
 	if got.Movements[0].QuantityAfter != store.ItemHistoryLimit+4 {
 		t.Errorf("newest quantityAfter = %d, want %d", got.Movements[0].QuantityAfter, store.ItemHistoryLimit+4)
+	}
+}
+
+// --- item icons -------------------------------------------------------------------
+
+func TestCreatingAnItemWithAnIcon(t *testing.T) {
+	h := newHarness(t)
+	householdID := h.withHousehold(t)
+
+	item := decodeItem(t, h.signedIn(t, http.MethodPost, "/api/households/"+householdID+"/items",
+		`{"name":"น้ำปลา","unit":"ขวด","icon":"🧴"}`))
+
+	if item.Icon != "🧴" {
+		t.Errorf("Icon = %q, want 🧴", item.Icon)
+	}
+}
+
+func TestEditingAnItemSetsAndClearsItsIcon(t *testing.T) {
+	h := newHarness(t)
+	householdID := h.withHousehold(t)
+	item := decodeItem(t, h.signedIn(t, http.MethodPost, "/api/households/"+householdID+"/items",
+		`{"name":"น้ำปลา","unit":"ขวด"}`))
+
+	set := decodeItem(t, h.signedIn(t, http.MethodPut, "/api/items/"+item.ID,
+		`{"name":"น้ำปลา","unit":"ขวด","icon":"🍚"}`))
+	if set.Icon != "🍚" {
+		t.Errorf("Icon = %q, want 🍚", set.Icon)
+	}
+
+	cleared := decodeItem(t, h.signedIn(t, http.MethodPut, "/api/items/"+item.ID,
+		`{"name":"น้ำปลา","unit":"ขวด","icon":""}`))
+	if cleared.Icon != "" {
+		t.Errorf("Icon = %q after clearing, want empty", cleared.Icon)
+	}
+}
+
+// An icon is a symbol, not a label. The API does not police which symbols the picker
+// offers, but it does refuse things that are plainly not one.
+func TestAnIconMustBeASymbol(t *testing.T) {
+	cases := []struct {
+		name, icon string
+	}{
+		{"latin text", `ABC`},
+		{"digits", `123`},
+		{"a single ascii letter", `x`},
+		{"a symbol with a space", `🧴 🍚`},
+		{"far too many code points", `🧴🍚🧻🧂🥛🧃🧼🧺🍞`},
+	}
+	for _, c := range cases {
+		h := newHarness(t)
+		householdID := h.withHousehold(t)
+
+		res := h.signedIn(t, http.MethodPost, "/api/households/"+householdID+"/items",
+			`{"name":"น้ำปลา","unit":"ขวด","icon":"`+c.icon+`"}`)
+
+		if res.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s (%s): status = %d, want %d", c.name, c.icon, res.StatusCode, http.StatusBadRequest)
+		}
+	}
+}
+
+// A joined emoji is several code points and must not be mistaken for "too long".
+func TestAJoinedEmojiIsAcceptedAsAnIcon(t *testing.T) {
+	h := newHarness(t)
+	householdID := h.withHousehold(t)
+
+	item := decodeItem(t, h.signedIn(t, http.MethodPost, "/api/households/"+householdID+"/items",
+		`{"name":"ของใช้","unit":"ชิ้น","icon":"🧑‍🍳"}`))
+
+	if item.Icon != "🧑‍🍳" {
+		t.Errorf("Icon = %q, want the joined emoji", item.Icon)
+	}
+}
+
+// The icon is a stand-in for a photo, not a competitor: an item with both keeps both, and
+// which one shows is the frontend's decision.
+func TestAnItemCanCarryBothAnIconAndAPhoto(t *testing.T) {
+	h := newHarness(t)
+	householdID := h.withHousehold(t)
+	item := decodeItem(t, h.signedIn(t, http.MethodPost, "/api/households/"+householdID+"/items",
+		`{"name":"น้ำปลา","unit":"ขวด","icon":"🧴"}`))
+
+	h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/image", "")
+	confirmed := decodeItem(t, h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/image",
+		`{"path":"items/`+item.ID+`/photo.jpg"}`))
+
+	if !confirmed.HasImage {
+		t.Error("hasImage = false after confirming an upload")
+	}
+	if confirmed.Icon != "🧴" {
+		t.Errorf("Icon = %q, want the icon kept alongside the photo", confirmed.Icon)
 	}
 }
