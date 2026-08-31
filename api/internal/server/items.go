@@ -49,48 +49,105 @@ func (d Deps) listItems(w http.ResponseWriter, r *http.Request, user store.User)
 	writeJSON(w, http.StatusOK, itemsResponse{Items: items, Units: units})
 }
 
-type createItemRequest struct {
+// itemRequest is the writable shape of an item, shared by create and update so the two
+// can never drift apart in what they accept.
+type itemRequest struct {
 	Name        string `json:"name"`
 	Unit        string `json:"unit"`
 	Description string `json:"description"`
+	// Absent or null means the item is never low. Pointer so that 0 — "low as soon as
+	// any is used" — is distinguishable from "not set".
+	LowStockThreshold *int `json:"lowStockThreshold"`
+}
+
+// validate returns a user-facing reason the input is unacceptable, or an empty string.
+func (in itemRequest) validate() string {
+	switch {
+	case strings.TrimSpace(in.Name) == "":
+		return "item name is required"
+	case strings.TrimSpace(in.Unit) == "":
+		return "unit is required"
+	case utf8.RuneCountInString(strings.TrimSpace(in.Name)) > maxItemNameLen:
+		return "item name is too long"
+	case utf8.RuneCountInString(strings.TrimSpace(in.Unit)) > maxUnitLen:
+		return "unit is too long"
+	case utf8.RuneCountInString(strings.TrimSpace(in.Description)) > maxDescriptionLen:
+		return "description is too long"
+	case in.LowStockThreshold != nil && (*in.LowStockThreshold < 0 || *in.LowStockThreshold > maxQuantity):
+		return "low stock threshold is out of range"
+	}
+	return ""
+}
+
+func (in itemRequest) toInput() store.ItemInput {
+	return store.ItemInput{
+		Name:              strings.TrimSpace(in.Name),
+		Unit:              strings.TrimSpace(in.Unit),
+		Description:       strings.TrimSpace(in.Description),
+		LowStockThreshold: in.LowStockThreshold,
+	}
 }
 
 func (d Deps) createItem(w http.ResponseWriter, r *http.Request, user store.User) {
-	var body createItemRequest
+	var body itemRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "malformed request body")
 		return
 	}
-
-	name := strings.TrimSpace(body.Name)
-	unit := strings.TrimSpace(body.Unit)
-	description := strings.TrimSpace(body.Description)
-
-	switch {
-	case name == "":
-		writeError(w, http.StatusBadRequest, "item name is required")
-		return
-	case unit == "":
-		writeError(w, http.StatusBadRequest, "unit is required")
-		return
-	case utf8.RuneCountInString(name) > maxItemNameLen:
-		writeError(w, http.StatusBadRequest, "item name is too long")
-		return
-	case utf8.RuneCountInString(unit) > maxUnitLen:
-		writeError(w, http.StatusBadRequest, "unit is too long")
-		return
-	case utf8.RuneCountInString(description) > maxDescriptionLen:
-		writeError(w, http.StatusBadRequest, "description is too long")
+	if problem := body.validate(); problem != "" {
+		writeError(w, http.StatusBadRequest, problem)
 		return
 	}
 
-	item, err := d.Items.CreateItem(r.Context(), r.PathValue("householdId"), user.ID, name, unit, description)
+	item, err := d.Items.CreateItem(r.Context(), r.PathValue("householdId"), user.ID, body.toInput())
 	if err != nil {
 		d.itemError(w, err, "create item")
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, item)
+}
+
+// updateItem changes an item's editable fields. Quantity is deliberately not among them:
+// it only ever moves through the quantity endpoint, so every change is recorded.
+func (d Deps) updateItem(w http.ResponseWriter, r *http.Request, user store.User) {
+	var body itemRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed request body")
+		return
+	}
+	if problem := body.validate(); problem != "" {
+		writeError(w, http.StatusBadRequest, problem)
+		return
+	}
+
+	item, err := d.Items.UpdateItem(r.Context(), r.PathValue("itemId"), user.ID, body.toInput())
+	if err != nil {
+		d.itemError(w, err, "update item")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, item)
+}
+
+// deleteItem soft-deletes an item, keeping its history readable.
+func (d Deps) deleteItem(w http.ResponseWriter, r *http.Request, user store.User) {
+	if err := d.Items.DeleteItem(r.Context(), r.PathValue("itemId"), user.ID); err != nil {
+		d.itemError(w, err, "delete item")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// listMovements answers the question a shared household actually asks: who used the last
+// one, and when.
+func (d Deps) listMovements(w http.ResponseWriter, r *http.Request, user store.User) {
+	movements, err := d.Items.MovementsForItem(r.Context(), r.PathValue("itemId"), user.ID)
+	if err != nil {
+		d.itemError(w, err, "list movements")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"movements": movements})
 }
 
 type adjustQuantityRequest struct {

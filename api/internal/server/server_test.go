@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -100,13 +101,15 @@ func (f *fakeHouseholds) HouseholdsForUser(_ context.Context, userID string) ([]
 }
 
 // fakeItems is an in-memory stand-in for the items and movement tables. It enforces
-// household membership, because "an outsider cannot touch our stock" is the behaviour
-// most worth testing at this layer.
+// household membership, tracks soft deletion and records movements, because "an outsider
+// cannot touch our stock" and "history survives deletion" are the behaviours most worth
+// testing at this layer.
 type fakeItems struct {
 	households    *fakeHouseholds
 	byHousehold   map[string][]store.Item
 	itemHousehold map[string]string
-	movements     map[string]int
+	deleted       map[string]bool
+	movements     map[string][]store.Movement
 	err           error
 	nextID        int
 }
@@ -116,7 +119,8 @@ func newFakeItems(h *fakeHouseholds) *fakeItems {
 		households:    h,
 		byHousehold:   map[string][]store.Item{},
 		itemHousehold: map[string]string{},
-		movements:     map[string]int{},
+		deleted:       map[string]bool{},
+		movements:     map[string][]store.Movement{},
 	}
 }
 
@@ -129,7 +133,26 @@ func (f *fakeItems) isMember(householdID, userID string) bool {
 	return false
 }
 
-func (f *fakeItems) CreateItem(_ context.Context, householdID, userID, name, unit, description string) (store.Item, error) {
+// find locates a live item the user may touch.
+func (f *fakeItems) find(itemID, userID string) (*store.Item, bool) {
+	householdID, ok := f.itemHousehold[itemID]
+	if !ok || f.deleted[itemID] || !f.isMember(householdID, userID) {
+		return nil, false
+	}
+	items := f.byHousehold[householdID]
+	for idx := range items {
+		if items[idx].ID == itemID {
+			return &items[idx], true
+		}
+	}
+	return nil, false
+}
+
+func lowFor(threshold *int, quantity int) bool {
+	return threshold != nil && quantity <= *threshold
+}
+
+func (f *fakeItems) CreateItem(_ context.Context, householdID, userID string, in store.ItemInput) (store.Item, error) {
 	if f.err != nil {
 		return store.Item{}, f.err
 	}
@@ -137,7 +160,11 @@ func (f *fakeItems) CreateItem(_ context.Context, householdID, userID, name, uni
 		return store.Item{}, store.ErrNotFound
 	}
 	f.nextID++
-	item := store.Item{ID: fmt.Sprintf("item-%d", f.nextID), Name: name, Unit: unit, Description: description}
+	item := store.Item{
+		ID: fmt.Sprintf("item-%d", f.nextID), Name: in.Name, Unit: in.Unit,
+		Description: in.Description, LowStockThreshold: in.LowStockThreshold,
+		IsLow: lowFor(in.LowStockThreshold, 0),
+	}
 	f.byHousehold[householdID] = append(f.byHousehold[householdID], item)
 	f.itemHousehold[item.ID] = householdID
 	return item, nil
@@ -150,17 +177,28 @@ func (f *fakeItems) ItemsForHousehold(_ context.Context, householdID, userID str
 	if !f.isMember(householdID, userID) {
 		return []store.Item{}, nil
 	}
-	return f.byHousehold[householdID], nil
+	live := []store.Item{}
+	for _, i := range f.byHousehold[householdID] {
+		if !f.deleted[i.ID] {
+			live = append(live, i)
+		}
+	}
+	// Low first, mirroring the SQL ordering.
+	sort.SliceStable(live, func(a, b int) bool { return live[a].IsLow && !live[b].IsLow })
+	return live, nil
 }
 
 func (f *fakeItems) UnitsForHousehold(_ context.Context, householdID, userID string) ([]string, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
+	if !f.isMember(householdID, userID) {
+		return []string{}, nil
+	}
 	seen := map[string]bool{}
 	units := []string{}
 	for _, i := range f.byHousehold[householdID] {
-		if f.isMember(householdID, userID) && !seen[i.Unit] {
+		if !f.deleted[i.ID] && !seen[i.Unit] {
 			seen[i.Unit] = true
 			units = append(units, i.Unit)
 		}
@@ -172,32 +210,74 @@ func (f *fakeItems) AdjustQuantity(_ context.Context, itemID, userID string, cha
 	if f.err != nil {
 		return store.Item{}, f.err
 	}
-	householdID, ok := f.itemHousehold[itemID]
-	if !ok || !f.isMember(householdID, userID) {
+	item, ok := f.find(itemID, userID)
+	if !ok {
 		return store.Item{}, store.ErrNotFound
 	}
 
-	items := f.byHousehold[householdID]
-	for idx := range items {
-		if items[idx].ID != itemID {
-			continue
-		}
-		before := items[idx].Quantity
-		after := before
-		switch {
-		case change.Absolute != nil:
-			after = *change.Absolute
-		case change.Delta != nil:
-			after = before + *change.Delta
-		}
-		after = max(after, 0)
-		if after != before {
-			f.movements[itemID]++
-		}
-		items[idx].Quantity = after
-		return items[idx], nil
+	before := item.Quantity
+	after := before
+	switch {
+	case change.Absolute != nil:
+		after = *change.Absolute
+	case change.Delta != nil:
+		after = before + *change.Delta
 	}
-	return store.Item{}, store.ErrNotFound
+	after = max(after, 0)
+
+	if after != before {
+		f.movements[itemID] = append(f.movements[itemID], store.Movement{
+			ID: fmt.Sprintf("mv-%d", len(f.movements[itemID])+1), ActorName: "สุภวิทย์",
+			QuantityBefore: before, QuantityAfter: after, Note: change.Note,
+		})
+	}
+	item.Quantity = after
+	item.IsLow = lowFor(item.LowStockThreshold, after)
+	return *item, nil
+}
+
+func (f *fakeItems) UpdateItem(_ context.Context, itemID, userID string, in store.ItemInput) (store.Item, error) {
+	if f.err != nil {
+		return store.Item{}, f.err
+	}
+	item, ok := f.find(itemID, userID)
+	if !ok {
+		return store.Item{}, store.ErrNotFound
+	}
+	item.Name = in.Name
+	item.Unit = in.Unit
+	item.Description = in.Description
+	item.LowStockThreshold = in.LowStockThreshold
+	item.IsLow = lowFor(in.LowStockThreshold, item.Quantity)
+	return *item, nil
+}
+
+func (f *fakeItems) DeleteItem(_ context.Context, itemID, userID string) error {
+	if f.err != nil {
+		return f.err
+	}
+	if _, ok := f.find(itemID, userID); !ok {
+		return store.ErrNotFound
+	}
+	f.deleted[itemID] = true
+	return nil
+}
+
+// Movements outlive their item, which is the whole point of soft deletion.
+func (f *fakeItems) MovementsForItem(_ context.Context, itemID, userID string) ([]store.Movement, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	householdID, ok := f.itemHousehold[itemID]
+	if !ok || !f.isMember(householdID, userID) {
+		return nil, store.ErrNotFound
+	}
+	out := append([]store.Movement{}, f.movements[itemID]...)
+	// Newest first.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
 }
 
 type harness struct {
@@ -794,7 +874,7 @@ func TestPlusAndMinusChangeTheQuantity(t *testing.T) {
 	}
 
 	// Four real changes; the fifth tap moved nothing and must not be recorded.
-	if n := h.items.movements[item.ID]; n != 4 {
+	if n := len(h.items.movements[item.ID]); n != 4 {
 		t.Errorf("movements = %d, want 4", n)
 	}
 }
@@ -863,6 +943,183 @@ func TestItemEndpointsRequireASession(t *testing.T) {
 		{http.MethodGet, "/api/households/some-id/items", ""},
 		{http.MethodPost, "/api/households/some-id/items", `{"name":"น้ำปลา","unit":"ขวด"}`},
 		{http.MethodPost, "/api/items/some-id/quantity", `{"delta":1}`},
+	} {
+		var req *http.Request
+		if c.body == "" {
+			req = httptest.NewRequest(c.method, c.path, nil)
+		} else {
+			req = httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
+		}
+		if res := h.do(req); res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, res.StatusCode, http.StatusUnauthorized)
+		}
+	}
+}
+
+// --- history, low stock and soft delete -----------------------------------------
+
+// newItem creates an item and returns it, the starting point for the tests below.
+func (h *harness) newItem(t *testing.T, householdID, payload string) store.Item {
+	t.Helper()
+	res := h.signedIn(t, http.MethodPost, "/api/households/"+householdID+"/items", payload)
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("create item: status = %d; body = %s", res.StatusCode, body(t, res))
+	}
+	var item store.Item
+	if err := json.Unmarshal([]byte(body(t, res)), &item); err != nil {
+		t.Fatalf("decode item: %v", err)
+	}
+	return item
+}
+
+func decodeMovements(t *testing.T, res *http.Response) []store.Movement {
+	t.Helper()
+	var out struct {
+		Movements []store.Movement `json:"movements"`
+	}
+	if err := json.Unmarshal([]byte(body(t, res)), &out); err != nil {
+		t.Fatalf("decode movements: %v", err)
+	}
+	return out.Movements
+}
+
+func TestHistoryShowsWhoChangedWhatNewestFirst(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	item := h.newItem(t, hh, `{"name":"น้ำปลา","unit":"ขวด"}`)
+
+	h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity", `{"delta":1}`)
+	h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity", `{"quantity":9,"note":"ซื้อมาเพิ่ม"}`)
+
+	movements := decodeMovements(t, h.signedIn(t, http.MethodGet, "/api/items/"+item.ID+"/movements", ""))
+
+	if len(movements) != 2 {
+		t.Fatalf("got %d movements, want 2", len(movements))
+	}
+	if movements[0].QuantityAfter != 9 || movements[0].Note != "ซื้อมาเพิ่ม" {
+		t.Errorf("newest movement = %+v, want the set-total with its note", movements[0])
+	}
+	if movements[0].ActorName == "" {
+		t.Error("movement has no actor name; the point is knowing who did it")
+	}
+}
+
+// An empty history is a normal state, not an error.
+func TestHistoryIsEmptyForAnUntouchedItem(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"น้ำปลา","unit":"ขวด"}`)
+
+	res := h.signedIn(t, http.MethodGet, "/api/items/"+item.ID+"/movements", "")
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	if n := len(decodeMovements(t, res)); n != 0 {
+		t.Errorf("got %d movements, want 0", n)
+	}
+}
+
+func TestDeletingAnItemRemovesItFromTheListButKeepsItsHistory(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	item := h.newItem(t, hh, `{"name":"น้ำปลา","unit":"ขวด"}`)
+	h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity", `{"delta":1}`)
+
+	if res := h.signedIn(t, http.MethodDelete, "/api/items/"+item.ID, ""); res.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want %d", res.StatusCode, http.StatusNoContent)
+	}
+
+	if items := decodeItems(t, h.signedIn(t, http.MethodGet, "/api/households/"+hh+"/items", "")).Items; len(items) != 0 {
+		t.Errorf("got %d items after deletion, want 0", len(items))
+	}
+	if n := len(decodeMovements(t, h.signedIn(t, http.MethodGet, "/api/items/"+item.ID+"/movements", ""))); n != 1 {
+		t.Errorf("got %d movements after deletion, want 1 — history was lost", n)
+	}
+}
+
+func TestDeletingTwiceIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"น้ำปลา","unit":"ขวด"}`)
+	h.signedIn(t, http.MethodDelete, "/api/items/"+item.ID, "")
+
+	if res := h.signedIn(t, http.MethodDelete, "/api/items/"+item.ID, ""); res.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestEditingAnItemChangesItsFields(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"นำปลา","unit":"ขวด"}`)
+
+	res := h.signedIn(t, http.MethodPut, "/api/items/"+item.ID,
+		`{"name":"น้ำปลา","unit":"ขวดใหญ่","description":"ยี่ห้อทิพรส","lowStockThreshold":2}`)
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", res.StatusCode, http.StatusOK, body(t, res))
+	}
+	var got store.Item
+	if err := json.Unmarshal([]byte(body(t, res)), &got); err != nil {
+		t.Fatalf("decode item: %v", err)
+	}
+	if got.Name != "น้ำปลา" || got.Unit != "ขวดใหญ่" || got.Description != "ยี่ห้อทิพรส" {
+		t.Errorf("item = %+v, want the corrected fields", got)
+	}
+	if got.LowStockThreshold == nil || *got.LowStockThreshold != 2 {
+		t.Errorf("LowStockThreshold = %v, want 2", got.LowStockThreshold)
+	}
+}
+
+func TestAnItemBecomesLowAtItsThreshold(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"น้ำปลา","unit":"ขวด","lowStockThreshold":2}`)
+
+	// Brand new item at 0 is already at or below 2.
+	if !item.IsLow {
+		t.Error("a new item at 0 with threshold 2 is not marked low")
+	}
+
+	res := h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity", `{"quantity":5}`)
+	var raised store.Item
+	json.Unmarshal([]byte(body(t, res)), &raised)
+	if raised.IsLow {
+		t.Error("an item at 5 with threshold 2 is still marked low")
+	}
+}
+
+func TestThresholdIsRejectedWhenOutOfRange(t *testing.T) {
+	for label, payload := range map[string]string{
+		"negative": `{"name":"น้ำปลา","unit":"ขวด","lowStockThreshold":-1}`,
+		"absurd":   `{"name":"น้ำปลา","unit":"ขวด","lowStockThreshold":999999999}`,
+	} {
+		h := newHarness(t)
+		hh := h.withHousehold(t)
+		if res := h.signedIn(t, http.MethodPost, "/api/households/"+hh+"/items", payload); res.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want %d", label, res.StatusCode, http.StatusBadRequest)
+		}
+	}
+}
+
+// A threshold of zero is meaningful — "low once none is left" — and must survive the
+// round trip rather than being treated as absent.
+func TestAThresholdOfZeroIsKept(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"น้ำปลา","unit":"ขวด","lowStockThreshold":0}`)
+
+	if item.LowStockThreshold == nil {
+		t.Fatal("a threshold of 0 was dropped")
+	}
+	if *item.LowStockThreshold != 0 {
+		t.Errorf("LowStockThreshold = %d, want 0", *item.LowStockThreshold)
+	}
+}
+
+func TestNewItemEndpointsRequireASession(t *testing.T) {
+	h := newHarness(t)
+
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/items/some-id/movements", ""},
+		{http.MethodPut, "/api/items/some-id", `{"name":"น้ำปลา","unit":"ขวด"}`},
+		{http.MethodDelete, "/api/items/some-id", ""},
 	} {
 		var req *http.Request
 		if c.body == "" {

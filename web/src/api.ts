@@ -75,17 +75,56 @@ export type Item = {
   unit: string
   description?: string
   quantity: number
+  /** Absent means the item is never low. */
+  lowStockThreshold?: number
+  /** Derived by the server, so the UI never disagrees with the list ordering. */
+  isLow: boolean
+}
+
+/** The writable half of an item, shared by add and edit. */
+export type ItemInput = {
+  name: string
+  unit: string
+  description?: string
+  lowStockThreshold?: number | null
+}
+
+/** One recorded change to an item's quantity, with the person who made it. */
+export type Movement = {
+  id: string
+  actorName: string
+  actorPictureUrl?: string
+  quantityBefore: number
+  quantityAfter: number
+  note?: string
+  createdAt: string
 }
 
 /** A household's items, plus the units it already uses (offered as chips). */
 export const getItems = (householdId: string) =>
   request<{ items: Item[]; units: string[] }>(`/api/households/${householdId}/items`)
 
-export const createItem = (householdId: string, item: { name: string; unit: string; description?: string }) =>
+export const createItem = (householdId: string, item: ItemInput) =>
   request<Item>(`/api/households/${householdId}/items`, {
     method: 'POST',
     body: JSON.stringify(item),
   })
+
+export const updateItem = (itemId: string, item: ItemInput) =>
+  request<Item>(`/api/items/${itemId}`, {
+    method: 'PUT',
+    body: JSON.stringify(item),
+  })
+
+/** Soft-deletes an item. Its history stays readable afterwards. */
+export const deleteItem = async (itemId: string): Promise<void> => {
+  const res = await fetch(`/api/items/${itemId}`, { method: 'DELETE' })
+  if (!res.ok) throw new ApiError(res.status, `could not delete item ${itemId}`)
+}
+
+/** An item's history, newest first. */
+export const getMovements = (itemId: string) =>
+  request<{ movements: Movement[] }>(`/api/items/${itemId}/movements`)
 
 /**
  * Changes an item's quantity. Send `delta` for the plus/minus buttons or `quantity` to

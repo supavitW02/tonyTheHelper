@@ -389,7 +389,7 @@ func TestCreateItemStartsAtZero(t *testing.T) {
 	db := open(t)
 	u, h := household(t, db, "U-item-create", "พ่อ")
 
-	item, err := db.CreateItem(context.Background(), h.ID, u.ID, "น้ำปลา", "ขวด", "")
+	item, err := db.CreateItem(context.Background(), h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
 	if err != nil {
 		t.Fatalf("CreateItem: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestCreateItemRefusesANonMember(t *testing.T) {
 	_, h := household(t, db, "U-item-owner", "เจ้าของ")
 	outsider := newUser(t, db, "U-item-outsider", "คนนอก")
 
-	_, err := db.CreateItem(context.Background(), h.ID, outsider.ID, "ของแอบใส่", "ชิ้น", "")
+	_, err := db.CreateItem(context.Background(), h.ID, outsider.ID, store.ItemInput{Name: "ของแอบใส่", Unit: "ชิ้น"})
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("error = %v, want ErrNotFound", err)
 	}
@@ -423,10 +423,10 @@ func TestItemsAreScopedToTheirHousehold(t *testing.T) {
 	mine, myHouse := household(t, db, "U-item-mine", "ฉัน")
 	theirs, theirHouse := household(t, db, "U-item-theirs", "เขา")
 
-	if _, err := db.CreateItem(ctx, myHouse.ID, mine.ID, "ของฉัน", "ชิ้น", ""); err != nil {
+	if _, err := db.CreateItem(ctx, myHouse.ID, mine.ID, store.ItemInput{Name: "ของฉัน", Unit: "ชิ้น"}); err != nil {
 		t.Fatalf("CreateItem: %v", err)
 	}
-	if _, err := db.CreateItem(ctx, theirHouse.ID, theirs.ID, "ของเขา", "ชิ้น", ""); err != nil {
+	if _, err := db.CreateItem(ctx, theirHouse.ID, theirs.ID, store.ItemInput{Name: "ของเขา", Unit: "ชิ้น"}); err != nil {
 		t.Fatalf("CreateItem: %v", err)
 	}
 
@@ -454,7 +454,7 @@ func TestUnitsAreDistinctAndScoped(t *testing.T) {
 	u, h := household(t, db, "U-item-units", "หน่วย")
 
 	for _, spec := range [][2]string{{"น้ำปลา", "ขวด"}, {"ซีอิ๊ว", "ขวด"}, {"ข้าวสาร", "ถุง"}} {
-		if _, err := db.CreateItem(ctx, h.ID, u.ID, spec[0], spec[1], ""); err != nil {
+		if _, err := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: spec[0], Unit: spec[1]}); err != nil {
 			t.Fatalf("CreateItem: %v", err)
 		}
 	}
@@ -472,7 +472,7 @@ func TestPlusOneWritesExactlyOneMovement(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
 	u, h := household(t, db, "U-qty-plus", "พ่อ")
-	item, err := db.CreateItem(ctx, h.ID, u.ID, "น้ำปลา", "ขวด", "")
+	item, err := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
 	if err != nil {
 		t.Fatalf("CreateItem: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestMinusAtZeroIsANoOp(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
 	u, h := household(t, db, "U-qty-floor", "พ่อ")
-	item, err := db.CreateItem(ctx, h.ID, u.ID, "น้ำปลา", "ขวด", "")
+	item, err := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
 	if err != nil {
 		t.Fatalf("CreateItem: %v", err)
 	}
@@ -524,7 +524,7 @@ func TestALargeReductionFloorsAtZero(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
 	u, h := household(t, db, "U-qty-underflow", "พ่อ")
-	item, _ := db.CreateItem(ctx, h.ID, u.ID, "น้ำปลา", "ขวด", "")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
 
 	two := 2
 	if _, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Absolute: &two}); err != nil {
@@ -550,7 +550,7 @@ func TestSettingATotalRecordsTheNote(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
 	u, h := household(t, db, "U-qty-total", "พ่อ")
-	item, _ := db.CreateItem(ctx, h.ID, u.ID, "น้ำปลา", "ขวด", "")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
 
 	twelve := 12
 	got, err := db.AdjustQuantity(ctx, item.ID, u.ID,
@@ -576,7 +576,7 @@ func TestSettingTheSameTotalRecordsNothing(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
 	u, h := household(t, db, "U-qty-same", "พ่อ")
-	item, _ := db.CreateItem(ctx, h.ID, u.ID, "น้ำปลา", "ขวด", "")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
 
 	zero := 0
 	if _, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Absolute: &zero}); err != nil {
@@ -592,7 +592,7 @@ func TestAdjustQuantityRefusesANonMember(t *testing.T) {
 	ctx := context.Background()
 	owner, h := household(t, db, "U-qty-owner", "เจ้าของ")
 	outsider := newUser(t, db, "U-qty-outsider", "คนนอก")
-	item, _ := db.CreateItem(ctx, h.ID, owner.ID, "น้ำปลา", "ขวด", "")
+	item, _ := db.CreateItem(ctx, h.ID, owner.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
 
 	one := 1
 	_, err := db.AdjustQuantity(ctx, item.ID, outsider.ID, store.QuantityChange{Delta: &one})
@@ -601,5 +601,215 @@ func TestAdjustQuantityRefusesANonMember(t *testing.T) {
 	}
 	if n := movementCount(t, item.ID); n != 0 {
 		t.Errorf("movements = %d, want 0 — an outsider changed someone else's stock", n)
+	}
+}
+
+// --- history, low stock and soft delete -----------------------------------------
+
+func threshold(n int) *int { return &n }
+
+// The history is the reason items are soft-deleted rather than removed, so it has to
+// survive deletion — otherwise the answer to "who used the last one" disappears with it.
+func TestMovementsSurviveASoftDeletedItem(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hist-delete", "พ่อ")
+	item, err := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	if err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+
+	three := 3
+	if _, err := db.AdjustQuantity(ctx, item.ID, u.ID,
+		store.QuantityChange{Absolute: &three, Note: "ซื้อมา"}); err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+	if err := db.DeleteItem(ctx, item.ID, u.ID); err != nil {
+		t.Fatalf("DeleteItem: %v", err)
+	}
+
+	movements, err := db.MovementsForItem(ctx, item.ID, u.ID)
+	if err != nil {
+		t.Fatalf("MovementsForItem: %v", err)
+	}
+	if len(movements) != 1 {
+		t.Fatalf("got %d movements after deletion, want 1", len(movements))
+	}
+	if movements[0].ActorName != "พ่อ" {
+		t.Errorf("ActorName = %q, want พ่อ", movements[0].ActorName)
+	}
+	if movements[0].Note != "ซื้อมา" {
+		t.Errorf("Note = %q, want ซื้อมา", movements[0].Note)
+	}
+}
+
+func TestMovementsAreNewestFirst(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hist-order", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+
+	for _, n := range []int{5, 3, 9} {
+		if _, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Absolute: &n}); err != nil {
+			t.Fatalf("AdjustQuantity: %v", err)
+		}
+	}
+
+	movements, err := db.MovementsForItem(ctx, item.ID, u.ID)
+	if err != nil {
+		t.Fatalf("MovementsForItem: %v", err)
+	}
+	if len(movements) != 3 {
+		t.Fatalf("got %d movements, want 3", len(movements))
+	}
+	if movements[0].QuantityAfter != 9 {
+		t.Errorf("newest movement ended at %d, want 9", movements[0].QuantityAfter)
+	}
+}
+
+func TestSoftDeletedItemsLeaveTheListAndTheUnitChips(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-del-list", "พ่อ")
+	keep, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "ข้าวสาร", Unit: "ถุง"})
+	drop, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+
+	if err := db.DeleteItem(ctx, drop.ID, u.ID); err != nil {
+		t.Fatalf("DeleteItem: %v", err)
+	}
+
+	items, err := db.ItemsForHousehold(ctx, h.ID, u.ID)
+	if err != nil {
+		t.Fatalf("ItemsForHousehold: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != keep.ID {
+		t.Errorf("items = %+v, want only ข้าวสาร", items)
+	}
+
+	units, err := db.UnitsForHousehold(ctx, h.ID, u.ID)
+	if err != nil {
+		t.Fatalf("UnitsForHousehold: %v", err)
+	}
+	if len(units) != 1 || units[0] != "ถุง" {
+		t.Errorf("units = %v, want only ถุง — a deleted item's unit is still offered", units)
+	}
+}
+
+func TestADeletedItemCannotBeAdjustedOrDeletedAgain(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-del-twice", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	if err := db.DeleteItem(ctx, item.ID, u.ID); err != nil {
+		t.Fatalf("DeleteItem: %v", err)
+	}
+
+	one := 1
+	if _, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Delta: &one}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("AdjustQuantity error = %v, want ErrNotFound", err)
+	}
+	if err := db.DeleteItem(ctx, item.ID, u.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("second DeleteItem error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestUpdateItemChangesTheEditableFields(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-edit", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "นำปลา", Unit: "ขวด"})
+
+	updated, err := db.UpdateItem(ctx, item.ID, u.ID, store.ItemInput{
+		Name: "น้ำปลา", Unit: "ขวดใหญ่", Description: "ยี่ห้อทิพรส", LowStockThreshold: threshold(2),
+	})
+	if err != nil {
+		t.Fatalf("UpdateItem: %v", err)
+	}
+	if updated.Name != "น้ำปลา" || updated.Unit != "ขวดใหญ่" || updated.Description != "ยี่ห้อทิพรส" {
+		t.Errorf("updated = %+v, want the corrected fields", updated)
+	}
+	if updated.LowStockThreshold == nil || *updated.LowStockThreshold != 2 {
+		t.Errorf("LowStockThreshold = %v, want 2", updated.LowStockThreshold)
+	}
+}
+
+// Editing must not be a back door into the quantity column: every change to a quantity
+// has to be recorded as a movement (ADR-0001).
+func TestUpdateItemLeavesQuantityAlone(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-edit-qty", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+
+	seven := 7
+	if _, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Absolute: &seven}); err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+
+	updated, err := db.UpdateItem(ctx, item.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	if err != nil {
+		t.Fatalf("UpdateItem: %v", err)
+	}
+	if updated.Quantity != 7 {
+		t.Errorf("Quantity = %d, want it untouched at 7", updated.Quantity)
+	}
+	if n := movementCount(t, item.ID); n != 1 {
+		t.Errorf("movements = %d, want 1 — editing wrote a movement", n)
+	}
+}
+
+func TestAnItemIsLowAtOrBelowItsThreshold(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-low", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID,
+		store.ItemInput{Name: "น้ำปลา", Unit: "ขวด", LowStockThreshold: threshold(2)})
+
+	for _, tc := range []struct {
+		quantity int
+		wantLow  bool
+	}{{5, false}, {3, false}, {2, true}, {1, true}, {0, true}} {
+		q := tc.quantity
+		got, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Absolute: &q})
+		if err != nil {
+			t.Fatalf("AdjustQuantity(%d): %v", tc.quantity, err)
+		}
+		if got.IsLow != tc.wantLow {
+			t.Errorf("quantity %d: IsLow = %v, want %v", tc.quantity, got.IsLow, tc.wantLow)
+		}
+	}
+}
+
+// An item with no threshold is never low, however little of it is left.
+func TestAnItemWithoutAThresholdIsNeverLow(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-nolow", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+
+	if item.IsLow {
+		t.Error("a brand new item with no threshold is reported low at quantity 0")
+	}
+}
+
+func TestLowItemsSortToTheTop(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-low-order", "พ่อ")
+
+	// "ก" sorts before "ฮ", so without the low-first rule ก would come first.
+	_, _ = db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "ก ของปกติ", Unit: "ชิ้น"})
+	low, _ := db.CreateItem(ctx, h.ID, u.ID,
+		store.ItemInput{Name: "ฮ ของใกล้หมด", Unit: "ชิ้น", LowStockThreshold: threshold(1)})
+
+	items, err := db.ItemsForHousehold(ctx, h.ID, u.ID)
+	if err != nil {
+		t.Fatalf("ItemsForHousehold: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+	if items[0].ID != low.ID {
+		t.Errorf("first item is %q, want the low one", items[0].Name)
 	}
 }
