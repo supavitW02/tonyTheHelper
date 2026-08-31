@@ -69,6 +69,7 @@ func run() error {
 			Verifier:   line.NewVerifier(cfg.LineChannelID),
 			Users:      db,
 			Households: db,
+			Items:      db,
 			Sessions:   session.NewManager(cfg.SessionSecret),
 		}),
 		ReadHeaderTimeout: 10 * time.Second,

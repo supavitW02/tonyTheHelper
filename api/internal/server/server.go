@@ -35,12 +35,21 @@ type Households interface {
 	HouseholdsForUser(ctx context.Context, userID string) ([]store.Household, error)
 }
 
+// Items persists a household's stock and the log of every change to it.
+type Items interface {
+	CreateItem(ctx context.Context, householdID, userID, name, unit, description string) (store.Item, error)
+	ItemsForHousehold(ctx context.Context, householdID, userID string) ([]store.Item, error)
+	UnitsForHousehold(ctx context.Context, householdID, userID string) ([]string, error)
+	AdjustQuantity(ctx context.Context, itemID, userID string, change store.QuantityChange) (store.Item, error)
+}
+
 type Deps struct {
 	Assets     fs.FS // the built web app
 	LiffID     string
 	Verifier   Verifier
 	Users      Users
 	Households Households
+	Items      Items
 	Sessions   *session.Manager
 }
 
@@ -52,6 +61,9 @@ func New(deps Deps) http.Handler {
 	mux.HandleFunc("GET /api/me", deps.requireUser(deps.me))
 	mux.HandleFunc("GET /api/households", deps.requireUser(deps.listHouseholds))
 	mux.HandleFunc("POST /api/households", deps.requireUser(deps.createHousehold))
+	mux.HandleFunc("GET /api/households/{householdId}/items", deps.requireUser(deps.listItems))
+	mux.HandleFunc("POST /api/households/{householdId}/items", deps.requireUser(deps.createItem))
+	mux.HandleFunc("POST /api/items/{itemId}/quantity", deps.requireUser(deps.adjustQuantity))
 	mux.Handle("/", webApp(deps.Assets))
 	return mux
 }
