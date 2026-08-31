@@ -2,6 +2,11 @@
 
 # 1. Build the web app. Vite writes into api/static, which the Go build then embeds.
 FROM node:24-alpine AS web
+# The build stamps this into the bundle and into version.json, which is how a running app
+# notices a newer deploy. The build context has no .git, so it is passed in rather than
+# read from the repository; without it the build falls back to a timestamp.
+ARG BUILD_ID=""
+ENV BUILD_ID=$BUILD_ID
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci

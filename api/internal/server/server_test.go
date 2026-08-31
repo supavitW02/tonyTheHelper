@@ -31,6 +31,7 @@ func assets() fstest.MapFS {
 		"assets/app-abc123.js": {Data: []byte("console.log('app')")},
 		"manifest.webmanifest": {Data: []byte(`{"name":"Tony The Helper"}`)},
 		"sw.js":                {Data: []byte("/* service worker */")},
+		"version.json":         {Data: []byte(`{"build":"abc123"}`)},
 	}
 }
 
@@ -2519,5 +2520,40 @@ func TestDeletingOneHouseholdLeavesTheOthersOverHTTP(t *testing.T) {
 	listed := decodeHouseholds(t, h.signedIn(t, http.MethodGet, "/api/households", ""))
 	if len(listed.Households) != 1 || listed.Households[0].ID != keep {
 		t.Errorf("remaining = %+v, want just %q", listed.Households, keep)
+	}
+}
+
+// A running app compares this against the build id compiled into its own bundle, and
+// reloads itself when they differ. A cached copy would answer with the build the user is
+// already on, which is exactly the state the check exists to escape.
+func TestTheVersionFileIsAlwaysRevalidated(t *testing.T) {
+	res := newHarness(t).get("/version.json")
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	if got := res.Header.Get("Cache-Control"); !strings.Contains(got, "no-cache") {
+		t.Errorf("Cache-Control = %q, want it to contain no-cache", got)
+	}
+	if got := res.Header.Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Errorf("Content-Type = %q, want it to contain application/json", got)
+	}
+}
+
+// The three files that never change name are the three that must always be revalidated.
+// Anything hashed is immutable; anything else gets a short life.
+func TestOnlyTheUnhashedEntryPointsAreUncached(t *testing.T) {
+	h := newHarness(t)
+
+	for path, want := range map[string]string{
+		"/":                     "no-cache",
+		"/version.json":         "no-cache",
+		"/sw.js":                "no-cache",
+		"/assets/app-abc123.js": "immutable",
+		"/manifest.webmanifest": "max-age=3600",
+	} {
+		if got := h.get(path).Header.Get("Cache-Control"); !strings.Contains(got, want) {
+			t.Errorf("%s: Cache-Control = %q, want it to contain %q", path, got, want)
+		}
 	}
 }
