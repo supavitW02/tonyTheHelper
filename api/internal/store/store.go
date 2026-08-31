@@ -4,7 +4,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
@@ -20,8 +22,21 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-// ErrNotFound is returned when a row that was asked for by id does not exist.
-var ErrNotFound = errors.New("store: not found")
+var (
+	// ErrNotFound is returned when a row that was asked for by id does not exist, and
+	// also when the caller may not see it — whether a thing exists is not something an
+	// outsider gets to learn by probing.
+	ErrNotFound = errors.New("store: not found")
+	// ErrNotOwner is for actions only a household's owner may take. Distinct from
+	// ErrNotFound because the caller is a member and already knows the household exists.
+	ErrNotOwner = errors.New("store: not the household owner")
+	// ErrInviteExpired and ErrInviteUsed are separated so the UI can say which it was;
+	// "try again" helps for neither, but the two mean different things to a person.
+	ErrInviteExpired = errors.New("store: invite has expired")
+	ErrInviteUsed    = errors.New("store: invite has already been used")
+	// ErrCannotRemoveOwner guards the one removal that would orphan a household.
+	ErrCannotRemoveOwner = errors.New("store: the owner cannot be removed")
+)
 
 // User is a person. Names and pictures are refreshed from LINE on each sign-in, so
 // they are a cache of LINE's truth rather than something this app owns.
@@ -658,6 +673,242 @@ func (db *DB) ItemAccessible(ctx context.Context, itemID, userID string) error {
 			return ErrNotFound
 		}
 		return fmt.Errorf("store: item accessible: %w", err)
+	}
+	return nil
+}
+
+// InviteTTL is how long an invite stays usable. Long enough that "I'll do it tonight"
+// works, short enough that a link forwarded months later does not still let someone in.
+const InviteTTL = 7 * 24 * time.Hour
+
+// Invite is a one-person, time-limited grant of membership.
+type Invite struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+// Member is a person in a household, as the members screen shows them.
+type Member struct {
+	UserID      string `json:"userId"`
+	DisplayName string `json:"displayName"`
+	PictureURL  string `json:"pictureUrl,omitempty"`
+	IsOwner     bool   `json:"isOwner"`
+}
+
+const selectOwnership = `
+select h.owner_id = $2 as is_owner
+from households h
+join household_members m on m.household_id = h.id and m.user_id = $2
+where h.id = $1`
+
+// requireOwner returns ErrNotFound for a non-member and ErrNotOwner for a member who is
+// not the owner, so the two cases stay distinguishable to the caller.
+func (db *DB) requireOwner(ctx context.Context, householdID, userID string) error {
+	var isOwner bool
+	err := db.pool.QueryRow(ctx, selectOwnership, householdID, userID).Scan(&isOwner)
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ErrNotFound
+	case err != nil:
+		if isInvalidUUID(err) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("store: ownership: %w", err)
+	case !isOwner:
+		return ErrNotOwner
+	}
+	return nil
+}
+
+const insertInvite = `
+insert into invites (household_id, created_by, token, expires_at)
+values ($1, $2, $3, $4)
+returning token, expires_at`
+
+// CreateInvite mints an invite for a household. Owner only: ownership is about people.
+func (db *DB) CreateInvite(ctx context.Context, householdID, ownerID string, now time.Time) (Invite, error) {
+	if err := db.requireOwner(ctx, householdID, ownerID); err != nil {
+		return Invite{}, err
+	}
+
+	token, err := newToken()
+	if err != nil {
+		return Invite{}, err
+	}
+
+	var invite Invite
+	if err := db.pool.QueryRow(ctx, insertInvite, householdID, ownerID, token, now.Add(InviteTTL)).
+		Scan(&invite.Token, &invite.ExpiresAt); err != nil {
+		return Invite{}, fmt.Errorf("store: create invite: %w", err)
+	}
+	return invite, nil
+}
+
+// newToken produces an opaque, unguessable invite token. 32 bytes so that guessing is not
+// a strategy even though the token travels through a chat app.
+func newToken() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("store: generate token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+const lockInvite = `
+select household_id, expires_at, consumed_by
+from invites
+where token = $1
+for update`
+
+const consumeInvite = `
+update invites set consumed_at = $2, consumed_by = $3
+where token = $1 and consumed_by is null`
+
+const insertMemberIfAbsent = `
+insert into household_members (household_id, user_id) values ($1, $2)
+on conflict (household_id, user_id) do nothing`
+
+const selectHouseholdByID = `
+select h.id, h.name, h.owner_id from households h where h.id = $1`
+
+// AcceptInvite joins the caller to the invite's household and makes it their current one.
+//
+// Re-opening an invite you have already used is not an error: someone who taps the same
+// LINE message twice should simply land in the household, not read a failure message.
+func (db *DB) AcceptInvite(ctx context.Context, token, userID string, now time.Time) (Household, error) {
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return Household{}, fmt.Errorf("store: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+
+	var householdID string
+	var expiresAt time.Time
+	var consumedBy *string
+
+	err = tx.QueryRow(ctx, lockInvite, token).Scan(&householdID, &expiresAt, &consumedBy)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Household{}, ErrNotFound
+	case err != nil:
+		return Household{}, fmt.Errorf("store: load invite: %w", err)
+	}
+
+	if !expiresAt.After(now) {
+		return Household{}, ErrInviteExpired
+	}
+
+	alreadyMember, err := db.isMemberTx(ctx, tx, householdID, userID)
+	if err != nil {
+		return Household{}, err
+	}
+
+	// Used by someone else, and the caller is not in the household: an invite grants
+	// membership to one person, not to everyone the link is forwarded to.
+	if !alreadyMember && consumedBy != nil && *consumedBy != userID {
+		return Household{}, ErrInviteUsed
+	}
+
+	if !alreadyMember {
+		if _, err := tx.Exec(ctx, insertMemberIfAbsent, householdID, userID); err != nil {
+			return Household{}, fmt.Errorf("store: add member: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, consumeInvite, token, now, userID); err != nil {
+		return Household{}, fmt.Errorf("store: consume invite: %w", err)
+	}
+	if _, err := tx.Exec(ctx, setLastHousehold, userID, householdID); err != nil {
+		return Household{}, fmt.Errorf("store: set last household: %w", err)
+	}
+
+	var h Household
+	if err := tx.QueryRow(ctx, selectHouseholdByID, householdID).Scan(&h.ID, &h.Name, &h.OwnerID); err != nil {
+		return Household{}, fmt.Errorf("store: load household: %w", err)
+	}
+	h.IsOwner = h.OwnerID == userID
+
+	if err := tx.Commit(ctx); err != nil {
+		return Household{}, fmt.Errorf("store: commit: %w", err)
+	}
+	return h, nil
+}
+
+func (db *DB) isMemberTx(ctx context.Context, tx pgx.Tx, householdID, userID string) (bool, error) {
+	var one int
+	err := tx.QueryRow(ctx, selectMembership, householdID, userID).Scan(&one)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("store: is member: %w", err)
+	}
+	return true, nil
+}
+
+const selectMembers = `
+select u.id, u.display_name, coalesce(u.picture_url, ''), (h.owner_id = u.id) as is_owner
+from household_members m
+join users u on u.id = m.user_id
+join households h on h.id = m.household_id
+where m.household_id = $1
+order by is_owner desc, u.display_name`
+
+// MembersOf lists a household's members for any of its members. The owner comes first.
+func (db *DB) MembersOf(ctx context.Context, householdID, userID string) ([]Member, error) {
+	member, err := db.IsMember(ctx, householdID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !member {
+		return nil, ErrNotFound
+	}
+
+	rows, err := db.pool.Query(ctx, selectMembers, householdID)
+	if err != nil {
+		return nil, fmt.Errorf("store: members: %w", err)
+	}
+	defer rows.Close()
+
+	members := []Member{}
+	for rows.Next() {
+		var m Member
+		if err := rows.Scan(&m.UserID, &m.DisplayName, &m.PictureURL, &m.IsOwner); err != nil {
+			return nil, fmt.Errorf("store: scan member: %w", err)
+		}
+		members = append(members, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: members: %w", err)
+	}
+	return members, nil
+}
+
+const deleteMember = `
+delete from household_members where household_id = $1 and user_id = $2`
+
+// RemoveMember revokes someone's access to a household.
+//
+// The user row and their movements are left alone: "แม่ took the last one" must still
+// render next year, and history is append-only (ADR-0001).
+func (db *DB) RemoveMember(ctx context.Context, householdID, ownerID, targetUserID string) error {
+	if err := db.requireOwner(ctx, householdID, ownerID); err != nil {
+		return err
+	}
+	// Removing the owner would leave a household nobody can manage.
+	if targetUserID == ownerID {
+		return ErrCannotRemoveOwner
+	}
+
+	tag, err := db.pool.Exec(ctx, deleteMember, householdID, targetUserID)
+	if err != nil {
+		if isInvalidUUID(err) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("store: remove member: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

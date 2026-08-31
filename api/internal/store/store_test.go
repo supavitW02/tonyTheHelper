@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -53,7 +54,7 @@ func reset(t *testing.T, url string) {
 	defer func() { _ = conn.Close(context.Background()) }()
 
 	if _, err := conn.Exec(context.Background(),
-		"truncate stock_movements, items, household_members, households, users restart identity cascade"); err != nil {
+		"truncate invites, stock_movements, items, household_members, households, users restart identity cascade"); err != nil {
 		t.Fatalf("reset: truncate: %v", err)
 	}
 }
@@ -889,5 +890,224 @@ func TestADeletedItemIsNoLongerAccessible(t *testing.T) {
 
 	if err := db.ItemAccessible(ctx, item.ID, u.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+// --- invites and members --------------------------------------------------------
+
+func TestOnlyTheOwnerCanCreateAnInvite(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-inv-owner", "พ่อ")
+	mum := newUser(t, db, "U-inv-mum", "แม่")
+	stranger := newUser(t, db, "U-inv-stranger", "คนแปลกหน้า")
+
+	invite, err := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+	if _, err := db.AcceptInvite(ctx, invite.Token, mum.ID, now); err != nil {
+		t.Fatalf("AcceptInvite: %v", err)
+	}
+
+	// A member, but not the owner.
+	if _, err := db.CreateInvite(ctx, h.ID, mum.ID, now); !errors.Is(err, store.ErrNotOwner) {
+		t.Errorf("member: error = %v, want ErrNotOwner", err)
+	}
+	// Not even a member: must not learn the household exists.
+	if _, err := db.CreateInvite(ctx, h.ID, stranger.ID, now); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("outsider: error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestEachInviteGetsItsOwnToken(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-inv-unique", "พ่อ")
+
+	first, err := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+	second, err := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+	if first.Token == second.Token {
+		t.Error("two invites share a token")
+	}
+	// The token travels through a chat app, so guessing must not be a strategy.
+	if len(first.Token) < 40 {
+		t.Errorf("token is %d characters; too short to be unguessable", len(first.Token))
+	}
+}
+
+func TestAcceptingAnInviteJoinsAndBecomesTheCurrentHousehold(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-acc-owner", "พ่อ")
+	mum := newUser(t, db, "U-acc-mum", "แม่")
+
+	invite, err := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+
+	joined, err := db.AcceptInvite(ctx, invite.Token, mum.ID, now)
+	if err != nil {
+		t.Fatalf("AcceptInvite: %v", err)
+	}
+	if joined.ID != h.ID {
+		t.Errorf("joined %q, want %q", joined.ID, h.ID)
+	}
+	if joined.IsOwner {
+		t.Error("the invitee is reported as owner")
+	}
+
+	member, err := db.IsMember(ctx, h.ID, mum.ID)
+	if err != nil {
+		t.Fatalf("IsMember: %v", err)
+	}
+	if !member {
+		t.Error("the invitee is not a member")
+	}
+
+	reloaded, err := db.UserByID(ctx, mum.ID)
+	if err != nil {
+		t.Fatalf("UserByID: %v", err)
+	}
+	if reloaded.LastHouseholdID != h.ID {
+		t.Errorf("LastHouseholdID = %q, want %q", reloaded.LastHouseholdID, h.ID)
+	}
+}
+
+func TestAcceptingTwiceIsFineButSomeoneElseIsRefused(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-reuse-owner", "พ่อ")
+	mum := newUser(t, db, "U-reuse-mum", "แม่")
+	neighbour := newUser(t, db, "U-reuse-neighbour", "เพื่อนบ้าน")
+
+	invite, _ := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if _, err := db.AcceptInvite(ctx, invite.Token, mum.ID, now); err != nil {
+		t.Fatalf("first accept: %v", err)
+	}
+	if _, err := db.AcceptInvite(ctx, invite.Token, mum.ID, now); err != nil {
+		t.Errorf("second accept by the same person: %v, want no error", err)
+	}
+	if _, err := db.AcceptInvite(ctx, invite.Token, neighbour.ID, now); !errors.Is(err, store.ErrInviteUsed) {
+		t.Errorf("forwarded link: error = %v, want ErrInviteUsed", err)
+	}
+}
+
+func TestAnExpiredInviteIsRefused(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-exp-owner", "พ่อ")
+	mum := newUser(t, db, "U-exp-mum", "แม่")
+
+	invite, _ := db.CreateInvite(ctx, h.ID, dad.ID, now)
+
+	// Anything past the TTL, judged against the clock the caller passes in.
+	later := now.Add(store.InviteTTL + time.Minute)
+	if _, err := db.AcceptInvite(ctx, invite.Token, mum.ID, later); !errors.Is(err, store.ErrInviteExpired) {
+		t.Errorf("error = %v, want ErrInviteExpired", err)
+	}
+}
+
+func TestAnUnknownTokenIsNotFound(t *testing.T) {
+	db := open(t)
+	u := newUser(t, db, "U-unknown-token", "ใครก็ไม่รู้")
+
+	if _, err := db.AcceptInvite(context.Background(), "no-such-token", u.ID, time.Now()); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+// Removing someone revokes access, but the person and their history are untouched —
+// "แม่ took the last one" has to still render next year.
+func TestRemovingAMemberKeepsTheirHistory(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-rm-owner", "พ่อ")
+	mum := newUser(t, db, "U-rm-mum", "แม่")
+	invite, _ := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if _, err := db.AcceptInvite(ctx, invite.Token, mum.ID, now); err != nil {
+		t.Fatalf("AcceptInvite: %v", err)
+	}
+
+	item, _ := db.CreateItem(ctx, h.ID, dad.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	three := 3
+	if _, err := db.AdjustQuantity(ctx, item.ID, mum.ID, store.QuantityChange{Absolute: &three}); err != nil {
+		t.Fatalf("AdjustQuantity as mum: %v", err)
+	}
+
+	if err := db.RemoveMember(ctx, h.ID, dad.ID, mum.ID); err != nil {
+		t.Fatalf("RemoveMember: %v", err)
+	}
+
+	// She has lost access...
+	if member, _ := db.IsMember(ctx, h.ID, mum.ID); member {
+		t.Error("removed member is still a member")
+	}
+	if _, err := db.ItemsForHousehold(ctx, h.ID, mum.ID); err == nil {
+		items, _ := db.ItemsForHousehold(ctx, h.ID, mum.ID)
+		if len(items) != 0 {
+			t.Error("removed member can still read the household's items")
+		}
+	}
+	// ...but she still exists, and so does what she did.
+	if _, err := db.UserByID(ctx, mum.ID); err != nil {
+		t.Errorf("the removed user was deleted: %v", err)
+	}
+	movements, err := db.MovementsForItem(ctx, item.ID, dad.ID)
+	if err != nil {
+		t.Fatalf("MovementsForItem: %v", err)
+	}
+	if len(movements) != 1 || movements[0].ActorName != "แม่" {
+		t.Errorf("movements = %+v, want one still attributed to แม่", movements)
+	}
+}
+
+func TestTheOwnerCannotBeRemoved(t *testing.T) {
+	db := open(t)
+	dad, h := household(t, db, "U-rm-self", "พ่อ")
+
+	if err := db.RemoveMember(context.Background(), h.ID, dad.ID, dad.ID); !errors.Is(err, store.ErrCannotRemoveOwner) {
+		t.Errorf("error = %v, want ErrCannotRemoveOwner", err)
+	}
+}
+
+func TestMembersOfListsTheOwnerFirstAndRefusesOutsiders(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	dad, h := household(t, db, "U-mem-owner", "พ่อ")
+	mum := newUser(t, db, "U-mem-mum", "แม่")
+	stranger := newUser(t, db, "U-mem-stranger", "คนแปลกหน้า")
+	invite, _ := db.CreateInvite(ctx, h.ID, dad.ID, now)
+	if _, err := db.AcceptInvite(ctx, invite.Token, mum.ID, now); err != nil {
+		t.Fatalf("AcceptInvite: %v", err)
+	}
+
+	members, err := db.MembersOf(ctx, h.ID, mum.ID)
+	if err != nil {
+		t.Fatalf("MembersOf: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("got %d members, want 2", len(members))
+	}
+	if !members[0].IsOwner || members[0].DisplayName != "พ่อ" {
+		t.Errorf("first member = %+v, want the owner", members[0])
+	}
+
+	if _, err := db.MembersOf(ctx, h.ID, stranger.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("outsider: error = %v, want ErrNotFound", err)
 	}
 }
