@@ -34,6 +34,9 @@ function inviteProblem(err: unknown): string {
 export default function App() {
   const [state, setState] = useState<State>({ status: 'loading' })
   const [notice, setNotice] = useState<string | null>(null)
+  // Creating an additional household is rare, so it stays behind a deliberate tap
+  // rather than occupying space next to the daily actions.
+  const [creatingAnother, setCreatingAnother] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -141,6 +144,29 @@ export default function App() {
         // previous household's stock while the new one loads.
         <HouseholdScreen key={current.id} household={current} user={state.user} />
       )}
+
+      {state.status === 'ready' &&
+        (creatingAnother ? (
+          <CreateHousehold
+            onCancel={() => setCreatingAnother(false)}
+            onCreated={(household) => {
+              setCreatingAnother(false)
+              setState({
+                ...state,
+                households: [...state.households, household],
+                currentId: household.id,
+              })
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => setCreatingAnother(true)}
+            className="min-h-12 self-start text-slate-600 underline underline-offset-4"
+          >
+            สร้างบ้านใหม่
+          </button>
+        ))}
 
       {state.status === 'failed' && (
         <section aria-live="assertive" className="flex flex-col gap-4">

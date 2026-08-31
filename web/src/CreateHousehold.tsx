@@ -7,7 +7,14 @@ import { createHousehold, type Household } from './api'
  * sees after signing in, so it explains what a household is rather than just asking
  * for a name.
  */
-export default function CreateHousehold({ onCreated }: { onCreated: (h: Household) => void }) {
+export default function CreateHousehold({
+  onCreated,
+  onCancel,
+}: {
+  onCreated: (h: Household) => void
+  /** Absent for the very first household, where there is nothing to go back to. */
+  onCancel?: () => void
+}) {
   const [name, setName] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -68,6 +75,12 @@ export default function CreateHousehold({ onCreated }: { onCreated: (h: Househol
       >
         {saving ? 'กำลังสร้าง…' : 'สร้างบ้าน'}
       </button>
+
+      {onCancel && (
+        <button type="button" onClick={onCancel} disabled={saving} className="min-h-14 rounded-xl border-2 border-slate-300 px-4 py-3">
+          ยกเลิก
+        </button>
+      )}
     </form>
   )
 }
