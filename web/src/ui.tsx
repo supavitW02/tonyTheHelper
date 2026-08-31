@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 
 /*
   The shared look of every control, kept here rather than repeated per component.
@@ -52,6 +52,40 @@ export function Field({
       </label>
       {children}
     </div>
+  )
+}
+
+/**
+ * A LINE profile picture, with a stand-in for when there isn't one.
+ *
+ * The fallback is not decoration. These URLs point at LINE's CDN, which the app does not
+ * control: a picture that loaded last week can start failing, and a member may have no
+ * picture at all. Without this, either case leaves a broken-image icon beside someone's
+ * name. Rendering the stand-in at the same size also means the row does not jump when a
+ * picture finishes loading.
+ */
+export function Avatar({ src, className }: { src?: string; className: string }) {
+  const [failed, setFailed] = useState(false)
+
+  if (!src || failed) {
+    return (
+      <span
+        aria-hidden="true"
+        className={`flex shrink-0 items-center justify-center rounded-full bg-brand-100 ${className}`}
+      >
+        👤
+      </span>
+    )
+  }
+  return (
+    <img
+      src={src}
+      alt=""
+      onError={() => setFailed(true)}
+      // LINE's CDN rejects requests that carry a referrer from another origin.
+      referrerPolicy="no-referrer"
+      className={`shrink-0 rounded-full bg-brand-100 object-cover ${className}`}
+    />
   )
 }
 

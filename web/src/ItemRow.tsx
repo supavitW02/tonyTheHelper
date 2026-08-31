@@ -121,25 +121,37 @@ function Panelled({ children }: { children: React.ReactNode }) {
 /**
  * The item's photo, or a neutral stand-in. An item without one must look deliberate
  * rather than broken, since most items will never have a photo.
+ *
+ * The stand-in sits underneath the photo rather than being replaced by it, so the box is
+ * never empty: it shows while the photo is still arriving — which on mobile data is a
+ * real wait, because the request is a redirect to storage — and it stays if the photo
+ * never arrives at all. The photo fades in on top once it has actually decoded. Because
+ * the box is a fixed size either way, nothing on the row moves.
  */
 function Thumbnail({ item }: { item: Item }) {
-  if (!item.hasImage) {
-    return (
-      <span
-        aria-hidden="true"
-        className="flex size-14 shrink-0 items-center justify-center rounded-xl bg-brand-100 text-2xl"
-      >
-        🧴
-      </span>
-    )
-  }
+  const [state, setState] = useState<'loading' | 'loaded' | 'failed'>('loading')
+  const waiting = item.hasImage && state === 'loading'
+
   return (
-    <img
-      src={itemImageUrl(item.id)}
-      alt={item.name}
-      loading="lazy"
-      className="size-14 shrink-0 rounded-xl bg-brand-100 object-cover"
-    />
+    <span className="relative flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-brand-100">
+      {state !== 'loaded' && (
+        <span aria-hidden="true" className={`text-2xl ${waiting ? 'animate-pulse' : ''}`}>
+          🧴
+        </span>
+      )}
+      {item.hasImage && state !== 'failed' && (
+        <img
+          src={itemImageUrl(item.id)}
+          alt={item.name}
+          loading="lazy"
+          onLoad={() => setState('loaded')}
+          onError={() => setState('failed')}
+          className={`absolute inset-0 size-full object-cover transition-opacity ${
+            state === 'loaded' ? 'opacity-100' : 'opacity-0'
+          }`}
+        />
+      )}
+    </span>
   )
 }
 

@@ -14,7 +14,7 @@ import AddItemForm from './AddItemForm'
 import ItemRow from './ItemRow'
 import MembersPanel from './MembersPanel'
 import RenameHousehold from './RenameHousehold'
-import { linkActionClass, Notice, primaryButtonClass } from './ui'
+import { Avatar, linkActionClass, Notice, primaryButtonClass } from './ui'
 
 /**
  * The two things a household screen is about. They used to share one scroll, with the
@@ -118,14 +118,7 @@ export default function HouseholdScreen({
   return (
     <div className="flex flex-col gap-6">
       <header className="flex items-start gap-3">
-        {user.pictureUrl && (
-          <img
-            src={user.pictureUrl}
-            alt=""
-            className="size-10 shrink-0 rounded-full object-cover"
-            referrerPolicy="no-referrer"
-          />
-        )}
+        <Avatar src={user.pictureUrl} className="size-10 text-lg" />
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           {/* Wraps rather than truncating: a house name is short, and reading all of it
               matters more than a tidy single line. */}

@@ -213,6 +213,7 @@ func webApp(assets fs.FS) http.Handler {
 		// Only regular files are served. A directory would otherwise be rendered as a
 		// browsable listing of the build's file names.
 		if info, err := fs.Stat(assets, name); err == nil && !info.IsDir() {
+			w.Header().Set("Cache-Control", cacheControl(name))
 			files.ServeHTTP(w, r)
 			return
 		}
@@ -226,7 +227,38 @@ func webApp(assets fs.FS) http.Handler {
 	})
 }
 
+// cacheControl decides how long a browser may keep each kind of file.
+//
+// The split matters more than it looks. Nothing here carried a cache directive before,
+// which cost a full bundle download on every open — and left the shell subject to the
+// browser's own heuristic caching, with no way to revalidate it.
+func cacheControl(name string) string {
+	switch {
+	// Vite gives build output a content-hashed filename, so a URL under /assets/ can
+	// never change meaning: if the bytes change, so does the name. Safe to keep forever,
+	// and this is what lets a repeat open skip re-downloading the whole app.
+	case strings.HasPrefix(name, "assets/"):
+		return "public, max-age=31536000, immutable"
+
+	// These two keep the same name across every deploy, so a stale copy is not
+	// self-correcting. It has to always be revalidated: a deploy replaces the hashed
+	// assets and the old ones stop existing, so a browser holding an old shell asks for
+	// a bundle that is gone and renders nothing — and the person using this app cannot
+	// be talked through a hard refresh. Same for the worker, which decides what else
+	// gets cached.
+	case name == "index.html", name == "sw.js":
+		return "no-cache"
+
+	// Icons and the manifest also keep stable names, but a stale one is cosmetic rather
+	// than fatal, so they get a short life instead of no caching at all.
+	default:
+		return "public, max-age=3600"
+	}
+}
+
 func appShell(w http.ResponseWriter, assets fs.FS) {
+	w.Header().Set("Cache-Control", cacheControl("index.html"))
+
 	shell, err := fs.ReadFile(assets, "index.html")
 	if err != nil {
 		http.Error(w, "web app is not built", http.StatusInternalServerError)
