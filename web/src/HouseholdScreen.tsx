@@ -11,6 +11,7 @@ import {
   type User,
 } from './api'
 import AddItemForm from './AddItemForm'
+import HistoryPanel from './HistoryPanel'
 import ItemRow from './ItemRow'
 import MembersPanel from './MembersPanel'
 import RenameHousehold from './RenameHousehold'
@@ -24,6 +25,7 @@ import { Avatar, linkActionClass, Notice, primaryButtonClass } from './ui'
 const TABS = [
   { id: 'items', label: 'ของใช้' },
   { id: 'members', label: 'สมาชิก' },
+  { id: 'history', label: 'ประวัติของใช้' },
 ] as const
 
 type Tab = (typeof TABS)[number]['id']
@@ -138,7 +140,7 @@ export default function HouseholdScreen({
         role="tablist"
         aria-label="มุมมองของบ้าน"
         onKeyDown={onTabKeyDown}
-        className="flex gap-2 rounded-xl bg-brand-100 p-2"
+        className="flex flex-wrap gap-2 rounded-xl bg-brand-100 p-2"
       >
         {TABS.map((t) => {
           const selected = t.id === tab
@@ -156,8 +158,11 @@ export default function HouseholdScreen({
               // Roving tabindex: the tab strip is one stop, arrows move within it.
               tabIndex={selected ? 0 : -1}
               onClick={() => setTab(t.id)}
-              className={`min-h-14 flex-1 rounded-lg px-4 font-medium ${
-                selected ? 'bg-brand-700 text-white' : 'text-brand-800'
+              // A white face on the tinted strip, so each tab reads as its own control.
+              // Three tabs do not fit one row at 375px and the strip wraps; without a
+              // face the wrapped tab looked like a stray caption rather than a button.
+              className={`min-h-14 flex-1 rounded-lg px-3 font-medium whitespace-nowrap ${
+                selected ? 'bg-brand-700 text-white' : 'bg-white text-brand-800'
               }`}
             >
               {t.label}
@@ -222,10 +227,14 @@ export default function HouseholdScreen({
         </div>
       </div>
 
-      {/* Both panels stay mounted so the tabs' aria-controls always point at something
-          real, but the member list only fetches once its tab has actually been opened. */}
+      {/* Every panel stays mounted so the tabs' aria-controls always point at something
+          real, but each only fetches once its tab has actually been opened. */}
       <div role="tabpanel" id="panel-members" aria-labelledby="tab-members" hidden={tab !== 'members'}>
         <MembersPanel household={household} meId={user.id} active={tab === 'members'} />
+      </div>
+
+      <div role="tabpanel" id="panel-history" aria-labelledby="tab-history" hidden={tab !== 'history'}>
+        <HistoryPanel household={household} active={tab === 'history'} />
       </div>
 
       {adding && (

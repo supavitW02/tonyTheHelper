@@ -301,9 +301,18 @@ function History({ itemId, unit }: { itemId: string; unit: string }) {
           ))}
         </ul>
       )}
+      {/* Say so rather than letting a capped list look like the whole story. An item
+          touched twice a week accumulates a hundred changes a year; this panel is for the
+          recent past, and the ประวัติของใช้ tab is where the rest is searchable. */}
+      {movements && movements.length >= ITEM_HISTORY_LIMIT && (
+        <p className="text-slate-600">แสดง {ITEM_HISTORY_LIMIT} รายการล่าสุด</p>
+      )}
     </Panelled>
   )
 }
+
+/** Mirrors ItemHistoryLimit in the API, which is what actually caps the list. */
+const ITEM_HISTORY_LIMIT = 10
 
 /** Choosing a photo. accept="image/*" is what offers the camera or the gallery on a phone. */
 function PhotoPicker({ item, onPhoto }: { item: Item; onPhoto: (file: File) => Promise<void> }) {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
@@ -281,6 +282,16 @@ type fakeItems struct {
 	imagePaths    map[string]string
 	err           error
 	nextID        int
+	// The real store orders the household-wide history by time, so the fake has to give
+	// its movements an order too. A counter, not the wall clock: tests must not depend on
+	// how fast they run.
+	clock int
+}
+
+// tick returns a timestamp strictly later than the previous one.
+func (f *fakeItems) tick() time.Time {
+	f.clock++
+	return time.Date(2026, 8, 31, 9, 0, f.clock, 0, time.UTC)
 }
 
 func newFakeItems(h *fakeHouseholds) *fakeItems {
@@ -399,6 +410,7 @@ func (f *fakeItems) AdjustQuantity(_ context.Context, itemID, userID string, cha
 		f.movements[itemID] = append(f.movements[itemID], store.Movement{
 			ID: fmt.Sprintf("mv-%d", len(f.movements[itemID])+1), ActorName: "สุภวิทย์",
 			QuantityBefore: before, QuantityAfter: after, Note: change.Note,
+			CreatedAt: f.tick(),
 		})
 	}
 	item.Quantity = after
@@ -447,7 +459,67 @@ func (f *fakeItems) MovementsForItem(_ context.Context, itemID, userID string) (
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}
+	if len(out) > store.ItemHistoryLimit {
+		out = out[:store.ItemHistoryLimit]
+	}
 	return out, nil
+}
+
+func (f *fakeItems) MovementsForHousehold(_ context.Context, householdID, userID string, filter store.MovementFilter) ([]store.HouseholdMovement, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if !f.isMember(householdID, userID) {
+		return nil, store.ErrNotFound
+	}
+
+	// Flatten every item's log, deleted items included — their history is why they were
+	// soft-deleted rather than removed.
+	out := []store.HouseholdMovement{}
+	for _, item := range f.byHousehold[householdID] {
+		for _, m := range f.movements[item.ID] {
+			if filter.ItemID != "" && filter.ItemID != item.ID {
+				continue
+			}
+			if q := strings.ToLower(filter.Query); q != "" &&
+				!strings.Contains(strings.ToLower(item.Name), q) &&
+				!strings.Contains(strings.ToLower(m.Note), q) {
+				continue
+			}
+			out = append(out, store.HouseholdMovement{
+				ID: m.ID, ItemID: item.ID, ItemName: item.Name, Unit: item.Unit,
+				ActorName: m.ActorName, QuantityBefore: m.QuantityBefore,
+				QuantityAfter: m.QuantityAfter, Note: m.Note, CreatedAt: m.CreatedAt,
+			})
+		}
+	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].CreatedAt.After(out[b].CreatedAt) })
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = store.HouseholdHistoryLimit
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (f *fakeItems) ItemsWithHistory(_ context.Context, householdID, userID string) ([]store.ItemRef, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if !f.isMember(householdID, userID) {
+		return nil, store.ErrNotFound
+	}
+	refs := []store.ItemRef{}
+	for _, item := range f.byHousehold[householdID] {
+		if len(f.movements[item.ID]) > 0 {
+			refs = append(refs, store.ItemRef{ID: item.ID, Name: item.Name})
+		}
+	}
+	sort.Slice(refs, func(a, b int) bool { return refs[a].Name < refs[b].Name })
+	return refs, nil
 }
 
 func (f *fakeItems) ItemAccessible(_ context.Context, itemID, userID string) error {
@@ -1994,5 +2066,220 @@ func TestTheServiceWorkerIsAlwaysRevalidated(t *testing.T) {
 	}
 	if got := res.Header.Get("Cache-Control"); !strings.Contains(got, "no-cache") {
 		t.Errorf("Cache-Control = %q, want it to contain no-cache", got)
+	}
+}
+
+// --- the household-wide history ---------------------------------------------------
+
+func decodeItem(t *testing.T, res *http.Response) store.Item {
+	t.Helper()
+	if res.StatusCode != http.StatusCreated && res.StatusCode != http.StatusOK {
+		t.Fatalf("decodeItem: status = %d; body = %s", res.StatusCode, body(t, res))
+	}
+	var item store.Item
+	if err := json.Unmarshal([]byte(body(t, res)), &item); err != nil {
+		t.Fatalf("decode item: %v", err)
+	}
+	return item
+}
+
+func decodeHistory(t *testing.T, res *http.Response) struct {
+	Movements []store.HouseholdMovement `json:"movements"`
+	Items     []store.ItemRef           `json:"items"`
+} {
+	t.Helper()
+	var out struct {
+		Movements []store.HouseholdMovement `json:"movements"`
+		Items     []store.ItemRef           `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(body(t, res)), &out); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	return out
+}
+
+// twoChangedItems sets up a household with two items that both have history. The rice
+// change happens last, so it is the newest.
+func (h *harness) twoChangedItems(t *testing.T) (householdID, fishID, riceID string) {
+	t.Helper()
+	householdID = h.withHousehold(t)
+	fish := decodeItem(t, h.signedIn(t, http.MethodPost, "/api/households/"+householdID+"/items",
+		`{"name":"น้ำปลา","unit":"ขวด"}`))
+	rice := decodeItem(t, h.signedIn(t, http.MethodPost, "/api/households/"+householdID+"/items",
+		`{"name":"ข้าวสาร","unit":"ถุง"}`))
+
+	h.signedIn(t, http.MethodPost, "/api/items/"+fish.ID+"/quantity", `{"delta":1}`)
+	h.signedIn(t, http.MethodPost, "/api/items/"+rice.ID+"/quantity", `{"quantity":4,"note":"ซื้อมาจากตลาด"}`)
+	return householdID, fish.ID, rice.ID
+}
+
+func TestHouseholdHistoryListsChangesAcrossItemsNewestFirst(t *testing.T) {
+	h := newHarness(t)
+	householdID, _, riceID := h.twoChangedItems(t)
+
+	res := h.signedIn(t, http.MethodGet, "/api/households/"+householdID+"/movements", "")
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", res.StatusCode, http.StatusOK, body(t, res))
+	}
+	got := decodeHistory(t, res)
+	if len(got.Movements) != 2 {
+		t.Fatalf("got %d movements, want 2: %+v", len(got.Movements), got.Movements)
+	}
+	if got.Movements[0].ItemID != riceID {
+		t.Errorf("newest movement is for item %q, want %q", got.Movements[0].ItemID, riceID)
+	}
+	if got.Movements[0].ItemName != "ข้าวสาร" || got.Movements[0].Unit != "ถุง" {
+		t.Errorf("newest movement = %+v, want it to name ข้าวสาร/ถุง", got.Movements[0])
+	}
+	if got.Movements[0].Note != "ซื้อมาจากตลาด" {
+		t.Errorf("note = %q, want ซื้อมาจากตลาด", got.Movements[0].Note)
+	}
+}
+
+// The list is read down rather than looked at, so it carries no picture at all — there is
+// no field on the payload for one.
+func TestHouseholdHistoryCarriesNoPictures(t *testing.T) {
+	h := newHarness(t)
+	householdID, _, _ := h.twoChangedItems(t)
+
+	raw := body(t, h.signedIn(t, http.MethodGet, "/api/households/"+householdID+"/movements", ""))
+
+	if strings.Contains(raw, "pictureUrl") {
+		t.Errorf("history payload mentions a picture: %s", raw)
+	}
+}
+
+func TestHouseholdHistoryOffersTheItemsItCanBeFilteredTo(t *testing.T) {
+	h := newHarness(t)
+	householdID, _, _ := h.twoChangedItems(t)
+	// A third item that has never been touched must not be offered.
+	h.signedIn(t, http.MethodPost, "/api/households/"+householdID+"/items", `{"name":"สบู่","unit":"ก้อน"}`)
+
+	got := decodeHistory(t, h.signedIn(t, http.MethodGet, "/api/households/"+householdID+"/movements", ""))
+
+	names := []string{}
+	for _, i := range got.Items {
+		names = append(names, i.Name)
+	}
+	if len(names) != 2 || names[0] != "ข้าวสาร" || names[1] != "น้ำปลา" {
+		t.Errorf("filter offers %v, want [ข้าวสาร น้ำปลา]", names)
+	}
+}
+
+func TestHouseholdHistoryCanBeNarrowedToOneItemOverHTTP(t *testing.T) {
+	h := newHarness(t)
+	householdID, fishID, _ := h.twoChangedItems(t)
+
+	got := decodeHistory(t, h.signedIn(t, http.MethodGet,
+		"/api/households/"+householdID+"/movements?itemId="+fishID, ""))
+
+	if len(got.Movements) != 1 || got.Movements[0].ItemID != fishID {
+		t.Errorf("filtered history = %+v, want only the น้ำปลา change", got.Movements)
+	}
+	// The choices stay whole: the filter is how the user changes their mind.
+	if len(got.Items) != 2 {
+		t.Errorf("filter offers %d items, want 2 even while filtered", len(got.Items))
+	}
+}
+
+func TestHouseholdHistorySearchMatchesNamesAndNotes(t *testing.T) {
+	h := newHarness(t)
+	householdID, fishID, riceID := h.twoChangedItems(t)
+
+	byName := decodeHistory(t, h.signedIn(t, http.MethodGet,
+		"/api/households/"+householdID+"/movements?q="+url.QueryEscape("น้ำปลา"), ""))
+	if len(byName.Movements) != 1 || byName.Movements[0].ItemID != fishID {
+		t.Errorf("search by name = %+v, want the น้ำปลา change", byName.Movements)
+	}
+
+	byNote := decodeHistory(t, h.signedIn(t, http.MethodGet,
+		"/api/households/"+householdID+"/movements?q="+url.QueryEscape("ตลาด"), ""))
+	if len(byNote.Movements) != 1 || byNote.Movements[0].ItemID != riceID {
+		t.Errorf("search by note = %+v, want the ข้าวสาร change", byNote.Movements)
+	}
+}
+
+func TestHouseholdHistorySearchIsTrimmed(t *testing.T) {
+	h := newHarness(t)
+	householdID, fishID, _ := h.twoChangedItems(t)
+
+	got := decodeHistory(t, h.signedIn(t, http.MethodGet,
+		"/api/households/"+householdID+"/movements?q="+url.QueryEscape("  น้ำปลา  "), ""))
+
+	if len(got.Movements) != 1 || got.Movements[0].ItemID != fishID {
+		t.Errorf("padded search = %+v, want the น้ำปลา change", got.Movements)
+	}
+}
+
+func TestHouseholdHistoryRejectsAnOverlongSearch(t *testing.T) {
+	h := newHarness(t)
+	householdID, _, _ := h.twoChangedItems(t)
+
+	res := h.signedIn(t, http.MethodGet,
+		"/api/households/"+householdID+"/movements?q="+url.QueryEscape(strings.Repeat("ก", 101)), "")
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+	}
+}
+
+// A 100-character Thai term is 300 bytes, so a byte limit would reject something well
+// inside the allowance.
+func TestHouseholdHistorySearchLengthIsCountedInCharacters(t *testing.T) {
+	h := newHarness(t)
+	householdID, _, _ := h.twoChangedItems(t)
+
+	res := h.signedIn(t, http.MethodGet,
+		"/api/households/"+householdID+"/movements?q="+url.QueryEscape(strings.Repeat("ก", 100)), "")
+
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d; body = %s", res.StatusCode, http.StatusOK, body(t, res))
+	}
+}
+
+func TestHouseholdHistoryOfAnotherHouseholdIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	householdID, _, _ := h.twoChangedItems(t)
+	stranger := h.asUser(t, "user-stranger-history", "คนแปลกหน้า")
+
+	res := h.doAs(t, stranger, http.MethodGet, "/api/households/"+householdID+"/movements", "")
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestHouseholdHistoryRequiresASession(t *testing.T) {
+	res := newHarness(t).get("/api/households/household-1/movements")
+
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// Requirement one: a single item's history is capped, so a much-used item does not return
+// a year of rows to a phone.
+func TestAnItemsHistoryOverHTTPIsCapped(t *testing.T) {
+	h := newHarness(t)
+	householdID := h.withHousehold(t)
+	item := decodeItem(t, h.signedIn(t, http.MethodPost, "/api/households/"+householdID+"/items",
+		`{"name":"น้ำปลา","unit":"ขวด"}`))
+	for i := 0; i < store.ItemHistoryLimit+4; i++ {
+		h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity", `{"delta":1}`)
+	}
+
+	var got struct {
+		Movements []store.Movement `json:"movements"`
+	}
+	res := h.signedIn(t, http.MethodGet, "/api/items/"+item.ID+"/movements", "")
+	if err := json.Unmarshal([]byte(body(t, res)), &got); err != nil {
+		t.Fatalf("decode movements: %v", err)
+	}
+	if len(got.Movements) != store.ItemHistoryLimit {
+		t.Errorf("got %d movements, want %d", len(got.Movements), store.ItemHistoryLimit)
+	}
+	if got.Movements[0].QuantityAfter != store.ItemHistoryLimit+4 {
+		t.Errorf("newest quantityAfter = %d, want %d", got.Movements[0].QuantityAfter, store.ItemHistoryLimit+4)
 	}
 }

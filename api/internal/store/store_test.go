@@ -1191,3 +1191,261 @@ func TestRenameHouseholdTreatsAMalformedIDAsNotFound(t *testing.T) {
 		t.Errorf("error = %v, want ErrNotFound", err)
 	}
 }
+
+// --- history: an item's own, and the household's ---------------------------------
+
+// bump applies n separate +1 changes, each its own transaction, so they land with
+// distinct timestamps and the ordering under a limit is meaningful.
+func bump(t *testing.T, db *store.DB, itemID, userID string, n int) {
+	t.Helper()
+	one := 1
+	for i := 0; i < n; i++ {
+		if _, err := db.AdjustQuantity(context.Background(), itemID, userID,
+			store.QuantityChange{Delta: &one}); err != nil {
+			t.Fatalf("AdjustQuantity %d: %v", i, err)
+		}
+	}
+}
+
+func TestAnItemsHistoryIsCappedAtTheNewestChanges(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hist-cap", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+
+	bump(t, db, item.ID, u.ID, store.ItemHistoryLimit+5)
+
+	got, err := db.MovementsForItem(ctx, item.ID, u.ID)
+	if err != nil {
+		t.Fatalf("MovementsForItem: %v", err)
+	}
+	if len(got) != store.ItemHistoryLimit {
+		t.Fatalf("got %d movements, want %d", len(got), store.ItemHistoryLimit)
+	}
+	// Newest first, and the newest is the last bump: quantity went to 15.
+	if got[0].QuantityAfter != store.ItemHistoryLimit+5 {
+		t.Errorf("newest quantityAfter = %d, want %d", got[0].QuantityAfter, store.ItemHistoryLimit+5)
+	}
+	// ...and the oldest kept is the 6th change, not the 1st.
+	if got[len(got)-1].QuantityAfter != 6 {
+		t.Errorf("oldest kept quantityAfter = %d, want 6", got[len(got)-1].QuantityAfter)
+	}
+}
+
+func TestHouseholdHistorySpansEveryItemNewestFirst(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hh-hist", "พ่อ")
+	fish, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	rice, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "ข้าวสาร", Unit: "ถุง"})
+
+	bump(t, db, fish.ID, u.ID, 2)
+	bump(t, db, rice.ID, u.ID, 1)
+
+	got, err := db.MovementsForHousehold(ctx, h.ID, u.ID, store.MovementFilter{Limit: store.HouseholdHistoryLimit})
+	if err != nil {
+		t.Fatalf("MovementsForHousehold: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d movements, want 3", len(got))
+	}
+	// The rice change was last, so it comes first, and it names its own item.
+	if got[0].ItemName != "ข้าวสาร" || got[0].Unit != "ถุง" {
+		t.Errorf("newest = %+v, want the ข้าวสาร/ถุง change", got[0])
+	}
+	if got[0].ActorName != "พ่อ" {
+		t.Errorf("actorName = %q, want พ่อ", got[0].ActorName)
+	}
+	if got[1].ItemName != "น้ำปลา" {
+		t.Errorf("second = %+v, want a น้ำปลา change", got[1])
+	}
+}
+
+func TestHouseholdHistoryIsCappedByTheLimit(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hh-hist-cap", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+
+	bump(t, db, item.ID, u.ID, 5)
+
+	got, err := db.MovementsForHousehold(ctx, h.ID, u.ID, store.MovementFilter{Limit: 3})
+	if err != nil {
+		t.Fatalf("MovementsForHousehold: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d movements, want 3", len(got))
+	}
+	if got[0].QuantityAfter != 5 {
+		t.Errorf("newest quantityAfter = %d, want 5", got[0].QuantityAfter)
+	}
+}
+
+func TestHouseholdHistoryCanBeNarrowedToOneItem(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hh-filter", "พ่อ")
+	fish, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	rice, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "ข้าวสาร", Unit: "ถุง"})
+	bump(t, db, fish.ID, u.ID, 2)
+	bump(t, db, rice.ID, u.ID, 3)
+
+	got, err := db.MovementsForHousehold(ctx, h.ID, u.ID,
+		store.MovementFilter{ItemID: fish.ID, Limit: store.HouseholdHistoryLimit})
+	if err != nil {
+		t.Fatalf("MovementsForHousehold: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d movements, want the 2 น้ำปลา ones", len(got))
+	}
+	for _, m := range got {
+		if m.ItemName != "น้ำปลา" {
+			t.Errorf("leaked a change for %q", m.ItemName)
+		}
+	}
+}
+
+func TestHouseholdHistorySearchesItemNamesAndNotes(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hh-search", "พ่อ")
+	fish, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	rice, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "ข้าวสาร", Unit: "ถุง"})
+
+	three := 3
+	if _, err := db.AdjustQuantity(ctx, rice.ID, u.ID,
+		store.QuantityChange{Absolute: &three, Note: "ซื้อมาใหม่จากตลาด"}); err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+	bump(t, db, fish.ID, u.ID, 1)
+
+	// By item name.
+	byName, err := db.MovementsForHousehold(ctx, h.ID, u.ID,
+		store.MovementFilter{Query: "น้ำปลา", Limit: store.HouseholdHistoryLimit})
+	if err != nil {
+		t.Fatalf("search by name: %v", err)
+	}
+	if len(byName) != 1 || byName[0].ItemName != "น้ำปลา" {
+		t.Errorf("search by name got %d rows: %+v", len(byName), byName)
+	}
+
+	// By something only the note says — the item name does not contain it.
+	byNote, err := db.MovementsForHousehold(ctx, h.ID, u.ID,
+		store.MovementFilter{Query: "ตลาด", Limit: store.HouseholdHistoryLimit})
+	if err != nil {
+		t.Fatalf("search by note: %v", err)
+	}
+	if len(byNote) != 1 || byNote[0].ItemName != "ข้าวสาร" {
+		t.Errorf("search by note got %d rows: %+v", len(byNote), byNote)
+	}
+}
+
+func TestHouseholdHistorySearchIgnoresLatinCase(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hh-case", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "Milo", Unit: "กล่อง"})
+	bump(t, db, item.ID, u.ID, 1)
+
+	got, err := db.MovementsForHousehold(ctx, h.ID, u.ID,
+		store.MovementFilter{Query: "milo", Limit: store.HouseholdHistoryLimit})
+	if err != nil {
+		t.Fatalf("MovementsForHousehold: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("got %d rows for a lowercase query, want 1", len(got))
+	}
+}
+
+// The search is a substring match, not a pattern. If it were built into a LIKE pattern,
+// a '%' typed by the user would match every row instead of none.
+func TestHouseholdHistorySearchTreatsWildcardsAsPlainText(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hh-wild", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	bump(t, db, item.ID, u.ID, 2)
+
+	for _, q := range []string{"%", "_", "%ปลา%"} {
+		got, err := db.MovementsForHousehold(ctx, h.ID, u.ID,
+			store.MovementFilter{Query: q, Limit: store.HouseholdHistoryLimit})
+		if err != nil {
+			t.Fatalf("query %q: %v", q, err)
+		}
+		if len(got) != 0 {
+			t.Errorf("query %q matched %d rows, want 0 — it is being treated as a pattern", q, len(got))
+		}
+	}
+}
+
+func TestHouseholdHistoryKeepsADeletedItemsChanges(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hh-deleted", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	bump(t, db, item.ID, u.ID, 2)
+
+	if err := db.DeleteItem(ctx, item.ID, u.ID); err != nil {
+		t.Fatalf("DeleteItem: %v", err)
+	}
+
+	// ADR-0001: the history is the reason an item is soft-deleted rather than removed.
+	got, err := db.MovementsForHousehold(ctx, h.ID, u.ID, store.MovementFilter{Limit: store.HouseholdHistoryLimit})
+	if err != nil {
+		t.Fatalf("MovementsForHousehold: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("got %d movements for a deleted item, want 2", len(got))
+	}
+}
+
+func TestHouseholdHistoryRefusesAnOutsider(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hh-out-owner", "พ่อ")
+	stranger := newUser(t, db, "U-hh-out-stranger", "คนแปลกหน้า")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	bump(t, db, item.ID, u.ID, 1)
+
+	if _, err := db.MovementsForHousehold(ctx, h.ID, stranger.ID,
+		store.MovementFilter{Limit: store.HouseholdHistoryLimit}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+	if _, err := db.ItemsWithHistory(ctx, h.ID, stranger.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("ItemsWithHistory: error = %v, want ErrNotFound", err)
+	}
+}
+
+// The filter dropdown is built from this, so it must offer exactly the items that have
+// something to show — including one that has since been deleted.
+func TestItemsWithHistoryListsOnlyItemsThatHaveChanged(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-hh-refs", "พ่อ")
+	changed, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "ข้าวสาร", Unit: "ถุง"})
+	untouched, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "น้ำปลา", Unit: "ขวด"})
+	gone, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "สบู่", Unit: "ก้อน"})
+	bump(t, db, changed.ID, u.ID, 1)
+	bump(t, db, gone.ID, u.ID, 1)
+	if err := db.DeleteItem(ctx, gone.ID, u.ID); err != nil {
+		t.Fatalf("DeleteItem: %v", err)
+	}
+
+	got, err := db.ItemsWithHistory(ctx, h.ID, u.ID)
+	if err != nil {
+		t.Fatalf("ItemsWithHistory: %v", err)
+	}
+	names := []string{}
+	for _, r := range got {
+		names = append(names, r.Name)
+	}
+	// Sorted by name: ข้าวสาร then สบู่. The untouched item is absent.
+	if len(names) != 2 || names[0] != "ข้าวสาร" || names[1] != "สบู่" {
+		t.Errorf("items with history = %v, want [ข้าวสาร สบู่]", names)
+	}
+	for _, r := range got {
+		if r.ID == untouched.ID {
+			t.Error("an item with no history was offered as a filter")
+		}
+	}
+}

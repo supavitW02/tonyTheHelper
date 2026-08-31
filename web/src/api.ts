@@ -181,6 +181,44 @@ export async function uploadItemPhoto(itemId: string, file: File): Promise<Item>
   })
 }
 
+/**
+ * A change to any item in the household, for the history tab.
+ *
+ * It names its own item, which a single item's history does not need, and carries no
+ * picture: the tab is a list of changes to read down, not people to look at.
+ */
+export type HouseholdMovement = {
+  id: string
+  itemId: string
+  itemName: string
+  unit: string
+  actorName: string
+  quantityBefore: number
+  quantityAfter: number
+  note?: string
+  createdAt: string
+}
+
+/** Just enough of an item to name it in the filter. */
+export type ItemRef = {
+  id: string
+  name: string
+}
+
+/**
+ * Recent changes across the whole household, newest first, plus the items the filter can
+ * narrow to. Both come back together so opening the tab is one request.
+ */
+export const getHouseholdHistory = (householdId: string, filter: { itemId?: string; q?: string } = {}) => {
+  const params = new URLSearchParams()
+  if (filter.itemId) params.set('itemId', filter.itemId)
+  if (filter.q) params.set('q', filter.q)
+  const query = params.toString()
+  return request<{ movements: HouseholdMovement[]; items: ItemRef[] }>(
+    `/api/households/${householdId}/movements${query ? `?${query}` : ''}`,
+  )
+}
+
 /** A person in a household, as the members screen shows them. */
 export type Member = {
   userId: string
