@@ -53,7 +53,7 @@ func reset(t *testing.T, url string) {
 	defer func() { _ = conn.Close(context.Background()) }()
 
 	if _, err := conn.Exec(context.Background(),
-		"truncate household_members, households, users restart identity cascade"); err != nil {
+		"truncate stock_movements, items, household_members, households, users restart identity cascade"); err != nil {
 		t.Fatalf("reset: truncate: %v", err)
 	}
 }
@@ -330,5 +330,276 @@ func TestSetLastHouseholdRefusesAHouseholdTheUserIsNotIn(t *testing.T) {
 	}
 	if reloaded.LastHouseholdID != "" {
 		t.Errorf("LastHouseholdID = %q, want empty — an outsider changed their own landing household", reloaded.LastHouseholdID)
+	}
+}
+
+// --- items and quantity ---------------------------------------------------------
+
+// household creates a user with their own household, the common setup for item tests.
+func household(t *testing.T, db *store.DB, lineID, name string) (store.User, store.Household) {
+	t.Helper()
+	u := newUser(t, db, lineID, name)
+	h, err := db.CreateHousehold(context.Background(), u.ID, "บ้าน "+name)
+	if err != nil {
+		t.Fatalf("CreateHousehold: %v", err)
+	}
+	return u, h
+}
+
+// movementCount reads the append-only log directly, so the assertions do not depend on
+// the read API that issue #6 adds.
+func movementCount(t *testing.T, itemID string) int {
+	t.Helper()
+	conn, err := pgx.Connect(context.Background(), os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("movementCount: connect: %v", err)
+	}
+	defer func() { _ = conn.Close(context.Background()) }()
+
+	var n int
+	if err := conn.QueryRow(context.Background(),
+		"select count(*) from stock_movements where item_id = $1", itemID).Scan(&n); err != nil {
+		t.Fatalf("movementCount: %v", err)
+	}
+	return n
+}
+
+func lastMovement(t *testing.T, itemID string) (before, after int, note string) {
+	t.Helper()
+	conn, err := pgx.Connect(context.Background(), os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("lastMovement: connect: %v", err)
+	}
+	defer func() { _ = conn.Close(context.Background()) }()
+
+	var n *string
+	err = conn.QueryRow(context.Background(),
+		`select quantity_before, quantity_after, note from stock_movements
+		 where item_id = $1 order by created_at desc limit 1`, itemID).Scan(&before, &after, &n)
+	if err != nil {
+		t.Fatalf("lastMovement: %v", err)
+	}
+	if n != nil {
+		note = *n
+	}
+	return before, after, note
+}
+
+func TestCreateItemStartsAtZero(t *testing.T) {
+	db := open(t)
+	u, h := household(t, db, "U-item-create", "พ่อ")
+
+	item, err := db.CreateItem(context.Background(), h.ID, u.ID, "น้ำปลา", "ขวด", "")
+	if err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+	if item.Name != "น้ำปลา" || item.Unit != "ขวด" {
+		t.Errorf("item = %+v, want น้ำปลา/ขวด", item)
+	}
+	if item.Quantity != 0 {
+		t.Errorf("Quantity = %d, want 0", item.Quantity)
+	}
+	if item.Description != "" {
+		t.Errorf("Description = %q, want empty", item.Description)
+	}
+}
+
+// A household id from a client is a claim. An outsider must not be able to write into
+// someone else's household, and must not learn whether it exists.
+func TestCreateItemRefusesANonMember(t *testing.T) {
+	db := open(t)
+	_, h := household(t, db, "U-item-owner", "เจ้าของ")
+	outsider := newUser(t, db, "U-item-outsider", "คนนอก")
+
+	_, err := db.CreateItem(context.Background(), h.ID, outsider.ID, "ของแอบใส่", "ชิ้น", "")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestItemsAreScopedToTheirHousehold(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	mine, myHouse := household(t, db, "U-item-mine", "ฉัน")
+	theirs, theirHouse := household(t, db, "U-item-theirs", "เขา")
+
+	if _, err := db.CreateItem(ctx, myHouse.ID, mine.ID, "ของฉัน", "ชิ้น", ""); err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+	if _, err := db.CreateItem(ctx, theirHouse.ID, theirs.ID, "ของเขา", "ชิ้น", ""); err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+
+	items, err := db.ItemsForHousehold(ctx, myHouse.ID, mine.ID)
+	if err != nil {
+		t.Fatalf("ItemsForHousehold: %v", err)
+	}
+	if len(items) != 1 || items[0].Name != "ของฉัน" {
+		t.Errorf("items = %+v, want only ของฉัน", items)
+	}
+
+	// ...and asking for someone else's household returns nothing, not their items.
+	leaked, err := db.ItemsForHousehold(ctx, theirHouse.ID, mine.ID)
+	if err != nil {
+		t.Fatalf("ItemsForHousehold (other): %v", err)
+	}
+	if len(leaked) != 0 {
+		t.Errorf("leaked %d items from another household", len(leaked))
+	}
+}
+
+func TestUnitsAreDistinctAndScoped(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-item-units", "หน่วย")
+
+	for _, spec := range [][2]string{{"น้ำปลา", "ขวด"}, {"ซีอิ๊ว", "ขวด"}, {"ข้าวสาร", "ถุง"}} {
+		if _, err := db.CreateItem(ctx, h.ID, u.ID, spec[0], spec[1], ""); err != nil {
+			t.Fatalf("CreateItem: %v", err)
+		}
+	}
+
+	units, err := db.UnitsForHousehold(ctx, h.ID, u.ID)
+	if err != nil {
+		t.Fatalf("UnitsForHousehold: %v", err)
+	}
+	if len(units) != 2 {
+		t.Fatalf("units = %v, want 2 distinct", units)
+	}
+}
+
+func TestPlusOneWritesExactlyOneMovement(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-qty-plus", "พ่อ")
+	item, err := db.CreateItem(ctx, h.ID, u.ID, "น้ำปลา", "ขวด", "")
+	if err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+
+	one := 1
+	got, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Delta: &one})
+	if err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+	if got.Quantity != 1 {
+		t.Errorf("Quantity = %d, want 1", got.Quantity)
+	}
+	if n := movementCount(t, item.ID); n != 1 {
+		t.Errorf("movements = %d, want exactly 1", n)
+	}
+
+	before, after, _ := lastMovement(t, item.ID)
+	if before != 0 || after != 1 {
+		t.Errorf("movement = %d→%d, want 0→1", before, after)
+	}
+}
+
+// Tapping minus at zero must do nothing at all — not error, and not record a movement,
+// because nothing moved.
+func TestMinusAtZeroIsANoOp(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-qty-floor", "พ่อ")
+	item, err := db.CreateItem(ctx, h.ID, u.ID, "น้ำปลา", "ขวด", "")
+	if err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+
+	minusOne := -1
+	got, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Delta: &minusOne})
+	if err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+	if got.Quantity != 0 {
+		t.Errorf("Quantity = %d, want 0", got.Quantity)
+	}
+	if n := movementCount(t, item.ID); n != 0 {
+		t.Errorf("movements = %d, want 0 — nothing moved", n)
+	}
+}
+
+// Reducing by more than is left floors at zero rather than going negative.
+func TestALargeReductionFloorsAtZero(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-qty-underflow", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, "น้ำปลา", "ขวด", "")
+
+	two := 2
+	if _, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Absolute: &two}); err != nil {
+		t.Fatalf("set to 2: %v", err)
+	}
+
+	minusTen := -10
+	got, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Delta: &minusTen})
+	if err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+	if got.Quantity != 0 {
+		t.Errorf("Quantity = %d, want 0", got.Quantity)
+	}
+
+	before, after, _ := lastMovement(t, item.ID)
+	if before != 2 || after != 0 {
+		t.Errorf("movement = %d→%d, want 2→0", before, after)
+	}
+}
+
+func TestSettingATotalRecordsTheNote(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-qty-total", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, "น้ำปลา", "ขวด", "")
+
+	twelve := 12
+	got, err := db.AdjustQuantity(ctx, item.ID, u.ID,
+		store.QuantityChange{Absolute: &twelve, Note: "ซื้อมาเพิ่ม"})
+	if err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+	if got.Quantity != 12 {
+		t.Errorf("Quantity = %d, want 12", got.Quantity)
+	}
+
+	before, after, note := lastMovement(t, item.ID)
+	if before != 0 || after != 12 {
+		t.Errorf("movement = %d→%d, want 0→12", before, after)
+	}
+	if note != "ซื้อมาเพิ่ม" {
+		t.Errorf("note = %q, want ซื้อมาเพิ่ม", note)
+	}
+}
+
+// Setting the total to what it already is changes nothing, so it records nothing.
+func TestSettingTheSameTotalRecordsNothing(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-qty-same", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, "น้ำปลา", "ขวด", "")
+
+	zero := 0
+	if _, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Absolute: &zero}); err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+	if n := movementCount(t, item.ID); n != 0 {
+		t.Errorf("movements = %d, want 0", n)
+	}
+}
+
+func TestAdjustQuantityRefusesANonMember(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	owner, h := household(t, db, "U-qty-owner", "เจ้าของ")
+	outsider := newUser(t, db, "U-qty-outsider", "คนนอก")
+	item, _ := db.CreateItem(ctx, h.ID, owner.ID, "น้ำปลา", "ขวด", "")
+
+	one := 1
+	_, err := db.AdjustQuantity(ctx, item.ID, outsider.ID, store.QuantityChange{Delta: &one})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if n := movementCount(t, item.ID); n != 0 {
+		t.Errorf("movements = %d, want 0 — an outsider changed someone else's stock", n)
 	}
 }

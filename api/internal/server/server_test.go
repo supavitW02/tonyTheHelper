@@ -99,11 +99,113 @@ func (f *fakeHouseholds) HouseholdsForUser(_ context.Context, userID string) ([]
 	return f.byUser[userID], nil
 }
 
+// fakeItems is an in-memory stand-in for the items and movement tables. It enforces
+// household membership, because "an outsider cannot touch our stock" is the behaviour
+// most worth testing at this layer.
+type fakeItems struct {
+	households    *fakeHouseholds
+	byHousehold   map[string][]store.Item
+	itemHousehold map[string]string
+	movements     map[string]int
+	err           error
+	nextID        int
+}
+
+func newFakeItems(h *fakeHouseholds) *fakeItems {
+	return &fakeItems{
+		households:    h,
+		byHousehold:   map[string][]store.Item{},
+		itemHousehold: map[string]string{},
+		movements:     map[string]int{},
+	}
+}
+
+func (f *fakeItems) isMember(householdID, userID string) bool {
+	for _, h := range f.households.byUser[userID] {
+		if h.ID == householdID {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeItems) CreateItem(_ context.Context, householdID, userID, name, unit, description string) (store.Item, error) {
+	if f.err != nil {
+		return store.Item{}, f.err
+	}
+	if !f.isMember(householdID, userID) {
+		return store.Item{}, store.ErrNotFound
+	}
+	f.nextID++
+	item := store.Item{ID: fmt.Sprintf("item-%d", f.nextID), Name: name, Unit: unit, Description: description}
+	f.byHousehold[householdID] = append(f.byHousehold[householdID], item)
+	f.itemHousehold[item.ID] = householdID
+	return item, nil
+}
+
+func (f *fakeItems) ItemsForHousehold(_ context.Context, householdID, userID string) ([]store.Item, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if !f.isMember(householdID, userID) {
+		return []store.Item{}, nil
+	}
+	return f.byHousehold[householdID], nil
+}
+
+func (f *fakeItems) UnitsForHousehold(_ context.Context, householdID, userID string) ([]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	seen := map[string]bool{}
+	units := []string{}
+	for _, i := range f.byHousehold[householdID] {
+		if f.isMember(householdID, userID) && !seen[i.Unit] {
+			seen[i.Unit] = true
+			units = append(units, i.Unit)
+		}
+	}
+	return units, nil
+}
+
+func (f *fakeItems) AdjustQuantity(_ context.Context, itemID, userID string, change store.QuantityChange) (store.Item, error) {
+	if f.err != nil {
+		return store.Item{}, f.err
+	}
+	householdID, ok := f.itemHousehold[itemID]
+	if !ok || !f.isMember(householdID, userID) {
+		return store.Item{}, store.ErrNotFound
+	}
+
+	items := f.byHousehold[householdID]
+	for idx := range items {
+		if items[idx].ID != itemID {
+			continue
+		}
+		before := items[idx].Quantity
+		after := before
+		switch {
+		case change.Absolute != nil:
+			after = *change.Absolute
+		case change.Delta != nil:
+			after = before + *change.Delta
+		}
+		after = max(after, 0)
+		if after != before {
+			f.movements[itemID]++
+		}
+		items[idx].Quantity = after
+		return items[idx], nil
+	}
+	return store.Item{}, store.ErrNotFound
+}
+
 type harness struct {
 	handler    http.Handler
 	verifier   *fakeVerifier
 	users      *fakeUsers
 	households *fakeHouseholds
+	items      *fakeItems
 	sessions   *session.Manager
 }
 
@@ -116,16 +218,18 @@ func newHarness(t *testing.T) *harness {
 	}}
 	u := newFakeUsers()
 	hh := newFakeHouseholds()
+	it := newFakeItems(hh)
 	s := session.NewManager(testSecret)
 
 	return &harness{
 		handler: server.New(server.Deps{
 			Assets: assets(), LiffID: "1234-abcd",
-			Verifier: v, Users: u, Households: hh, Sessions: s,
+			Verifier: v, Users: u, Households: hh, Items: it, Sessions: s,
 		}),
 		verifier:   v,
 		users:      u,
 		households: hh,
+		items:      it,
 		sessions:   s,
 	}
 }
@@ -531,6 +635,235 @@ func TestHouseholdEndpointsRequireASession(t *testing.T) {
 		{http.MethodPost, "/api/households", `{"name":"บ้านเรา"}`},
 	}
 	for _, c := range cases {
+		var req *http.Request
+		if c.body == "" {
+			req = httptest.NewRequest(c.method, c.path, nil)
+		} else {
+			req = httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
+		}
+		if res := h.do(req); res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, res.StatusCode, http.StatusUnauthorized)
+		}
+	}
+}
+
+// --- items and quantity ---------------------------------------------------------
+
+// withHousehold signs in and creates a household, returning its id — the starting point
+// for every item test.
+func (h *harness) withHousehold(t *testing.T) string {
+	t.Helper()
+	var created store.Household
+	res := h.signedIn(t, http.MethodPost, "/api/households", `{"name":"บ้านเรา"}`)
+	if err := json.Unmarshal([]byte(body(t, res)), &created); err != nil {
+		t.Fatalf("decode household: %v", err)
+	}
+	return created.ID
+}
+
+func decodeItems(t *testing.T, res *http.Response) struct {
+	Items []store.Item `json:"items"`
+	Units []string     `json:"units"`
+} {
+	t.Helper()
+	var out struct {
+		Items []store.Item `json:"items"`
+		Units []string     `json:"units"`
+	}
+	if err := json.Unmarshal([]byte(body(t, res)), &out); err != nil {
+		t.Fatalf("decode items: %v", err)
+	}
+	return out
+}
+
+func TestCreateItemAppearsInTheList(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+
+	res := h.signedIn(t, http.MethodPost, "/api/households/"+hh+"/items",
+		`{"name":"น้ำปลา","unit":"ขวด"}`)
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body = %s", res.StatusCode, http.StatusCreated, body(t, res))
+	}
+
+	got := decodeItems(t, h.signedIn(t, http.MethodGet, "/api/households/"+hh+"/items", ""))
+	if len(got.Items) != 1 {
+		t.Fatalf("got %d items, want 1", len(got.Items))
+	}
+	if got.Items[0].Name != "น้ำปลา" || got.Items[0].Unit != "ขวด" {
+		t.Errorf("item = %+v, want น้ำปลา/ขวด", got.Items[0])
+	}
+	if got.Items[0].Quantity != 0 {
+		t.Errorf("quantity = %d, want 0", got.Items[0].Quantity)
+	}
+}
+
+// The unit chips are what stop one unit acquiring three spellings.
+func TestUnitsAreOfferedFromExistingItems(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	h.signedIn(t, http.MethodPost, "/api/households/"+hh+"/items", `{"name":"น้ำปลา","unit":"ขวด"}`)
+	h.signedIn(t, http.MethodPost, "/api/households/"+hh+"/items", `{"name":"ซีอิ๊ว","unit":"ขวด"}`)
+	h.signedIn(t, http.MethodPost, "/api/households/"+hh+"/items", `{"name":"ข้าวสาร","unit":"ถุง"}`)
+
+	got := decodeItems(t, h.signedIn(t, http.MethodGet, "/api/households/"+hh+"/items", ""))
+
+	if len(got.Units) != 2 {
+		t.Errorf("units = %v, want 2 distinct", got.Units)
+	}
+}
+
+func TestCreateItemRequiresNameAndUnit(t *testing.T) {
+	cases := map[string]string{
+		"no name":    `{"name":"","unit":"ขวด"}`,
+		"blank name": `{"name":"   ","unit":"ขวด"}`,
+		"no unit":    `{"name":"น้ำปลา","unit":""}`,
+		"blank unit": `{"name":"น้ำปลา","unit":"  "}`,
+	}
+	for label, payload := range cases {
+		h := newHarness(t)
+		hh := h.withHousehold(t)
+		if res := h.signedIn(t, http.MethodPost, "/api/households/"+hh+"/items", payload); res.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want %d", label, res.StatusCode, http.StatusBadRequest)
+		}
+	}
+}
+
+// Item names are limited in runes. A 100-character Thai name is 300 bytes and must be
+// accepted, or the limit is really a 33-character one for Thai users.
+func TestItemNameLengthIsCountedInCharacters(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+
+	res := h.signedIn(t, http.MethodPost, "/api/households/"+hh+"/items",
+		`{"name":"`+strings.Repeat("ก", 100)+`","unit":"ชิ้น"}`)
+
+	if res.StatusCode != http.StatusCreated {
+		t.Errorf("status = %d, want %d — a 100-character Thai name was rejected", res.StatusCode, http.StatusCreated)
+	}
+}
+
+// An item in someone else's household must be invisible, and indistinguishable from one
+// that does not exist.
+func TestItemsInAnotherHouseholdAreNotFound(t *testing.T) {
+	h := newHarness(t)
+	theirs := h.withHousehold(t)
+
+	// A second person, with their own session and no membership of `theirs`.
+	other := newHarness(t)
+	other.households.byUser["user-uuid-1"] = nil // belongs to nothing
+
+	res := other.signedIn(t, http.MethodPost, "/api/households/"+theirs+"/items",
+		`{"name":"ของแอบใส่","unit":"ชิ้น"}`)
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestPlusAndMinusChangeTheQuantity(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	var item store.Item
+	if err := json.Unmarshal([]byte(body(t, h.signedIn(t, http.MethodPost, "/api/households/"+hh+"/items",
+		`{"name":"น้ำปลา","unit":"ขวด"}`))), &item); err != nil {
+		t.Fatalf("decode item: %v", err)
+	}
+
+	for _, step := range []struct {
+		payload string
+		want    int
+	}{
+		{`{"delta":1}`, 1},
+		{`{"delta":1}`, 2},
+		{`{"delta":-1}`, 1},
+		{`{"delta":-1}`, 0},
+		{`{"delta":-1}`, 0}, // minus at zero does nothing
+	} {
+		res := h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity", step.payload)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status = %d, want %d", step.payload, res.StatusCode, http.StatusOK)
+		}
+		var got store.Item
+		if err := json.Unmarshal([]byte(body(t, res)), &got); err != nil {
+			t.Fatalf("decode item: %v", err)
+		}
+		if got.Quantity != step.want {
+			t.Errorf("after %s quantity = %d, want %d", step.payload, got.Quantity, step.want)
+		}
+	}
+
+	// Four real changes; the fifth tap moved nothing and must not be recorded.
+	if n := h.items.movements[item.ID]; n != 4 {
+		t.Errorf("movements = %d, want 4", n)
+	}
+}
+
+func TestSettingATotalWorks(t *testing.T) {
+	h := newHarness(t)
+	hh := h.withHousehold(t)
+	var item store.Item
+	json.Unmarshal([]byte(body(t, h.signedIn(t, http.MethodPost, "/api/households/"+hh+"/items",
+		`{"name":"น้ำปลา","unit":"ขวด"}`))), &item)
+
+	res := h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity",
+		`{"quantity":12,"note":"ซื้อมาเพิ่ม"}`)
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	var got store.Item
+	json.Unmarshal([]byte(body(t, res)), &got)
+	if got.Quantity != 12 {
+		t.Errorf("quantity = %d, want 12", got.Quantity)
+	}
+}
+
+// delta and quantity mean different things; sending both is ambiguous and sending
+// neither is a no-op the caller probably did not intend.
+func TestQuantityRequiresExactlyOneOfDeltaOrTotal(t *testing.T) {
+	for label, payload := range map[string]string{
+		"both":    `{"delta":1,"quantity":5}`,
+		"neither": `{"note":"อะไรก็ไม่รู้"}`,
+	} {
+		h := newHarness(t)
+		hh := h.withHousehold(t)
+		var item store.Item
+		json.Unmarshal([]byte(body(t, h.signedIn(t, http.MethodPost, "/api/households/"+hh+"/items",
+			`{"name":"น้ำปลา","unit":"ขวด"}`))), &item)
+
+		if res := h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity", payload); res.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want %d", label, res.StatusCode, http.StatusBadRequest)
+		}
+	}
+}
+
+func TestQuantityRejectsOutOfRangeValues(t *testing.T) {
+	for label, payload := range map[string]string{
+		"negative total": `{"quantity":-1}`,
+		"absurd total":   `{"quantity":999999999}`,
+		"absurd delta":   `{"delta":100000}`,
+	} {
+		h := newHarness(t)
+		hh := h.withHousehold(t)
+		var item store.Item
+		json.Unmarshal([]byte(body(t, h.signedIn(t, http.MethodPost, "/api/households/"+hh+"/items",
+			`{"name":"น้ำปลา","unit":"ขวด"}`))), &item)
+
+		if res := h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity", payload); res.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want %d", label, res.StatusCode, http.StatusBadRequest)
+		}
+	}
+}
+
+func TestItemEndpointsRequireASession(t *testing.T) {
+	h := newHarness(t)
+
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/households/some-id/items", ""},
+		{http.MethodPost, "/api/households/some-id/items", `{"name":"น้ำปลา","unit":"ขวด"}`},
+		{http.MethodPost, "/api/items/some-id/quantity", `{"delta":1}`},
+	} {
 		var req *http.Request
 		if c.body == "" {
 			req = httptest.NewRequest(c.method, c.path, nil)

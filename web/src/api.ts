@@ -67,3 +67,33 @@ export const createHousehold = (name: string) =>
     method: 'POST',
     body: JSON.stringify({ name }),
   })
+
+/** A kind of thing a household keeps in stock. */
+export type Item = {
+  id: string
+  name: string
+  unit: string
+  description?: string
+  quantity: number
+}
+
+/** A household's items, plus the units it already uses (offered as chips). */
+export const getItems = (householdId: string) =>
+  request<{ items: Item[]; units: string[] }>(`/api/households/${householdId}/items`)
+
+export const createItem = (householdId: string, item: { name: string; unit: string; description?: string }) =>
+  request<Item>(`/api/households/${householdId}/items`, {
+    method: 'POST',
+    body: JSON.stringify(item),
+  })
+
+/**
+ * Changes an item's quantity. Send `delta` for the plus/minus buttons or `quantity` to
+ * set a total — never both. The server does the arithmetic so the movement log can never
+ * disagree with the stored quantity.
+ */
+export const adjustQuantity = (itemId: string, change: { delta?: number; quantity?: number; note?: string }) =>
+  request<Item>(`/api/items/${itemId}/quantity`, {
+    method: 'POST',
+    body: JSON.stringify(change),
+  })

@@ -247,3 +247,196 @@ func (db *DB) SetLastHousehold(ctx context.Context, userID, householdID string) 
 	}
 	return nil
 }
+
+// Item is a kind of thing a household keeps in stock, not a single physical object.
+type Item struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Unit        string `json:"unit"`
+	Description string `json:"description,omitempty"`
+	Quantity    int    `json:"quantity"`
+}
+
+const insertItem = `
+insert into items (household_id, name, unit, description, created_by)
+select $1, $2, $3, nullif($4, ''), $5
+where exists (select 1 from household_members where household_id = $1 and user_id = $5)
+returning id, name, unit, coalesce(description, ''), quantity`
+
+// CreateItem adds an item to a household.
+//
+// Membership is part of the insert rather than a separate check: a household id arriving
+// from a client is a claim, and doing it in one statement leaves no window between the
+// check and the write. A non-member gets ErrNotFound, not a permission error — whether
+// the household exists is none of their business.
+func (db *DB) CreateItem(ctx context.Context, householdID, userID, name, unit, description string) (Item, error) {
+	var i Item
+	err := db.pool.QueryRow(ctx, insertItem, householdID, name, unit, description, userID).
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity)
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Item{}, ErrNotFound
+	case err != nil:
+		if isInvalidUUID(err) {
+			return Item{}, ErrNotFound
+		}
+		return Item{}, fmt.Errorf("store: create item: %w", err)
+	}
+	return i, nil
+}
+
+const selectItems = `
+select i.id, i.name, i.unit, coalesce(i.description, ''), i.quantity
+from items i
+join household_members m on m.household_id = i.household_id and m.user_id = $2
+where i.household_id = $1
+order by i.name`
+
+// ItemsForHousehold lists a household's items for one of its members.
+func (db *DB) ItemsForHousehold(ctx context.Context, householdID, userID string) ([]Item, error) {
+	rows, err := db.pool.Query(ctx, selectItems, householdID, userID)
+	if err != nil {
+		if isInvalidUUID(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: items for household: %w", err)
+	}
+	defer rows.Close()
+
+	items := []Item{}
+	for rows.Next() {
+		var i Item
+		if err := rows.Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity); err != nil {
+			return nil, fmt.Errorf("store: scan item: %w", err)
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: items for household: %w", err)
+	}
+	return items, nil
+}
+
+const selectUnits = `
+select distinct i.unit
+from items i
+join household_members m on m.household_id = i.household_id and m.user_id = $2
+where i.household_id = $1
+order by i.unit`
+
+// UnitsForHousehold returns the units this household already uses, which the UI offers as
+// tappable chips. Units stay free text; this only nudges people towards reusing a spelling
+// rather than inventing a second one for the same thing.
+func (db *DB) UnitsForHousehold(ctx context.Context, householdID, userID string) ([]string, error) {
+	rows, err := db.pool.Query(ctx, selectUnits, householdID, userID)
+	if err != nil {
+		if isInvalidUUID(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: units for household: %w", err)
+	}
+	defer rows.Close()
+
+	units := []string{}
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, fmt.Errorf("store: scan unit: %w", err)
+		}
+		units = append(units, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: units for household: %w", err)
+	}
+	return units, nil
+}
+
+// QuantityChange describes a requested change. Exactly one of Delta and Absolute is set:
+// Delta for the plus/minus buttons, Absolute for setting a total after shopping.
+type QuantityChange struct {
+	Delta    *int
+	Absolute *int
+	Note     string
+}
+
+const lockItemForUpdate = `
+select i.quantity, i.name, i.unit, coalesce(i.description, '')
+from items i
+join household_members m on m.household_id = i.household_id and m.user_id = $2
+where i.id = $1
+for update of i`
+
+const updateItemQuantity = `
+update items set quantity = $2, updated_at = now() where id = $1`
+
+const insertMovement = `
+insert into stock_movements (item_id, user_id, quantity_before, quantity_after, note)
+values ($1, $2, $3, $4, nullif($5, ''))`
+
+// AdjustQuantity is the only way an item's quantity ever changes.
+//
+// Per ADR-0001 the column is authoritative and the movement log is append-only, and both
+// are written in one transaction — if a caller could update the column directly the two
+// would drift and the history would silently start lying.
+//
+// The row is locked for the duration so two people tapping minus at the same moment cannot
+// both read the same starting quantity.
+func (db *DB) AdjustQuantity(ctx context.Context, itemID, userID string, change QuantityChange) (Item, error) {
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return Item{}, fmt.Errorf("store: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+
+	var before int
+	item := Item{ID: itemID}
+	err = tx.QueryRow(ctx, lockItemForUpdate, itemID, userID).
+		Scan(&before, &item.Name, &item.Unit, &item.Description)
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Item{}, ErrNotFound
+	case err != nil:
+		if isInvalidUUID(err) {
+			return Item{}, ErrNotFound
+		}
+		return Item{}, fmt.Errorf("store: lock item: %w", err)
+	}
+
+	after := targetQuantity(before, change)
+
+	// Nothing changed — minus at zero, or setting the total to what it already is. There
+	// is no movement to record, because nothing moved.
+	if after == before {
+		item.Quantity = before
+		return item, tx.Commit(ctx)
+	}
+
+	if _, err := tx.Exec(ctx, updateItemQuantity, itemID, after); err != nil {
+		return Item{}, fmt.Errorf("store: update quantity: %w", err)
+	}
+	if _, err := tx.Exec(ctx, insertMovement, itemID, userID, before, after, change.Note); err != nil {
+		return Item{}, fmt.Errorf("store: insert movement: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Item{}, fmt.Errorf("store: commit: %w", err)
+	}
+
+	item.Quantity = after
+	return item, nil
+}
+
+// targetQuantity resolves a requested change to a final quantity, floored at zero so that
+// tapping minus at zero is a no-op rather than an error the user has to understand.
+func targetQuantity(before int, change QuantityChange) int {
+	after := before
+	switch {
+	case change.Absolute != nil:
+		after = *change.Absolute
+	case change.Delta != nil:
+		after = before + *change.Delta
+	}
+	return max(after, 0)
+}
