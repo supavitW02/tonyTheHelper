@@ -29,12 +29,19 @@ type Users interface {
 	UserByID(ctx context.Context, id string) (store.User, error)
 }
 
+// Households persists the groups those people share a stock of items with.
+type Households interface {
+	CreateHousehold(ctx context.Context, ownerID, name string) (store.Household, error)
+	HouseholdsForUser(ctx context.Context, userID string) ([]store.Household, error)
+}
+
 type Deps struct {
-	Assets   fs.FS // the built web app
-	LiffID   string
-	Verifier Verifier
-	Users    Users
-	Sessions *session.Manager
+	Assets     fs.FS // the built web app
+	LiffID     string
+	Verifier   Verifier
+	Users      Users
+	Households Households
+	Sessions   *session.Manager
 }
 
 func New(deps Deps) http.Handler {
@@ -42,7 +49,9 @@ func New(deps Deps) http.Handler {
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /api/config", deps.config)
 	mux.HandleFunc("POST /api/session", deps.signIn)
-	mux.HandleFunc("GET /api/me", deps.me)
+	mux.HandleFunc("GET /api/me", deps.requireUser(deps.me))
+	mux.HandleFunc("GET /api/households", deps.requireUser(deps.listHouseholds))
+	mux.HandleFunc("POST /api/households", deps.requireUser(deps.createHousehold))
 	mux.Handle("/", webApp(deps.Assets))
 	return mux
 }
@@ -102,28 +111,35 @@ func (d Deps) signIn(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, user)
 }
 
+// requireUser resolves the session into a user before the handler runs, so no handler
+// has to remember to check. A missing, forged or expired session and a session for a user
+// who no longer exists are all "not signed in" — the answer is the same either way.
+func (d Deps) requireUser(next func(http.ResponseWriter, *http.Request, store.User)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := d.Sessions.FromRequest(r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "not signed in")
+			return
+		}
+
+		user, err := d.Users.UserByID(r.Context(), userID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeError(w, http.StatusUnauthorized, "not signed in")
+			return
+		case err != nil:
+			log.Printf("auth: load user: %v", err)
+			writeError(w, http.StatusInternalServerError, "could not load the user")
+			return
+		}
+
+		next(w, r, user)
+	}
+}
+
 // me returns the signed-in user, and is how the frontend discovers on load that it
 // already has a session and can skip the LINE round trip entirely.
-func (d Deps) me(w http.ResponseWriter, r *http.Request) {
-	userID, err := d.Sessions.FromRequest(r)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "not signed in")
-		return
-	}
-
-	user, err := d.Users.UserByID(r.Context(), userID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		// A validly signed session for a user who no longer exists. Treat it as signed
-		// out rather than as a server error.
-		writeError(w, http.StatusUnauthorized, "not signed in")
-		return
-	case err != nil:
-		log.Printf("me: load user: %v", err)
-		writeError(w, http.StatusInternalServerError, "could not load the user")
-		return
-	}
-
+func (d Deps) me(w http.ResponseWriter, _ *http.Request, user store.User) {
 	writeJSON(w, http.StatusOK, user)
 }
 

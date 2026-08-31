@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -70,11 +71,40 @@ func (f *fakeUsers) UserByID(_ context.Context, id string) (store.User, error) {
 	return u, nil
 }
 
+// fakeHouseholds is an in-memory stand-in for the household tables.
+type fakeHouseholds struct {
+	byUser map[string][]store.Household
+	err    error
+	nextID int
+}
+
+func newFakeHouseholds() *fakeHouseholds {
+	return &fakeHouseholds{byUser: map[string][]store.Household{}}
+}
+
+func (f *fakeHouseholds) CreateHousehold(_ context.Context, ownerID, name string) (store.Household, error) {
+	if f.err != nil {
+		return store.Household{}, f.err
+	}
+	f.nextID++
+	h := store.Household{ID: fmt.Sprintf("household-%d", f.nextID), Name: name, OwnerID: ownerID, IsOwner: true}
+	f.byUser[ownerID] = append(f.byUser[ownerID], h)
+	return h, nil
+}
+
+func (f *fakeHouseholds) HouseholdsForUser(_ context.Context, userID string) ([]store.Household, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.byUser[userID], nil
+}
+
 type harness struct {
-	handler  http.Handler
-	verifier *fakeVerifier
-	users    *fakeUsers
-	sessions *session.Manager
+	handler    http.Handler
+	verifier   *fakeVerifier
+	users      *fakeUsers
+	households *fakeHouseholds
+	sessions   *session.Manager
 }
 
 func newHarness(t *testing.T) *harness {
@@ -85,14 +115,37 @@ func newHarness(t *testing.T) *harness {
 		PictureURL:  "https://profile.line-scdn.net/abc",
 	}}
 	u := newFakeUsers()
+	hh := newFakeHouseholds()
 	s := session.NewManager(testSecret)
 
 	return &harness{
-		handler:  server.New(server.Deps{Assets: assets(), LiffID: "1234-abcd", Verifier: v, Users: u, Sessions: s}),
-		verifier: v,
-		users:    u,
-		sessions: s,
+		handler: server.New(server.Deps{
+			Assets: assets(), LiffID: "1234-abcd",
+			Verifier: v, Users: u, Households: hh, Sessions: s,
+		}),
+		verifier:   v,
+		users:      u,
+		households: hh,
+		sessions:   s,
 	}
+}
+
+// signedIn returns a request carrying a valid session for the signed-in user.
+func (h *harness) signedIn(t *testing.T, method, path, body string) *http.Response {
+	t.Helper()
+	cookies := h.signIn("a.valid.token").Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("sign-in did not set a session cookie")
+	}
+	var req *http.Request
+	if body == "" {
+		req = httptest.NewRequest(method, path, nil)
+	} else {
+		req = httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.AddCookie(cookies[0])
+	return h.do(req)
 }
 
 func (h *harness) do(req *http.Request) *http.Response {
@@ -348,5 +401,144 @@ func TestMeForAUserThatNoLongerExistsIsUnauthorised(t *testing.T) {
 
 	if res := h.do(req); res.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// --- households -----------------------------------------------------------------
+
+func decodeHouseholds(t *testing.T, res *http.Response) struct {
+	Households []store.Household `json:"households"`
+	CurrentID  string            `json:"currentId"`
+} {
+	t.Helper()
+	var out struct {
+		Households []store.Household `json:"households"`
+		CurrentID  string            `json:"currentId"`
+	}
+	if err := json.Unmarshal([]byte(body(t, res)), &out); err != nil {
+		t.Fatalf("decode households: %v", err)
+	}
+	return out
+}
+
+// A user who belongs to nothing gets an empty list and no current household — that is
+// what puts them on the create-household screen rather than an error page.
+func TestListHouseholdsIsEmptyForANewUser(t *testing.T) {
+	h := newHarness(t)
+
+	res := h.signedIn(t, http.MethodGet, "/api/households", "")
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	got := decodeHouseholds(t, res)
+	if len(got.Households) != 0 {
+		t.Errorf("got %d households, want 0", len(got.Households))
+	}
+	if got.CurrentID != "" {
+		t.Errorf("currentId = %q, want empty", got.CurrentID)
+	}
+}
+
+func TestCreateHouseholdMakesTheCallerOwner(t *testing.T) {
+	h := newHarness(t)
+
+	res := h.signedIn(t, http.MethodPost, "/api/households", `{"name":"บ้านเรา"}`)
+
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body = %s", res.StatusCode, http.StatusCreated, body(t, res))
+	}
+	var got store.Household
+	if err := json.Unmarshal([]byte(body(t, res)), &got); err != nil {
+		t.Fatalf("decode household: %v", err)
+	}
+	if got.Name != "บ้านเรา" {
+		t.Errorf("name = %q, want บ้านเรา", got.Name)
+	}
+	if !got.IsOwner {
+		t.Error("creator is not marked as owner")
+	}
+}
+
+func TestCreatedHouseholdBecomesTheCurrentOne(t *testing.T) {
+	h := newHarness(t)
+	h.signedIn(t, http.MethodPost, "/api/households", `{"name":"บ้านเรา"}`)
+
+	got := decodeHouseholds(t, h.signedIn(t, http.MethodGet, "/api/households", ""))
+
+	if len(got.Households) != 1 {
+		t.Fatalf("got %d households, want 1", len(got.Households))
+	}
+	if got.CurrentID != got.Households[0].ID {
+		t.Errorf("currentId = %q, want %q", got.CurrentID, got.Households[0].ID)
+	}
+}
+
+func TestCreateHouseholdRejectsAnEmptyName(t *testing.T) {
+	for _, name := range []string{"", "   "} {
+		res := newHarness(t).signedIn(t, http.MethodPost, "/api/households", `{"name":"`+name+`"}`)
+		if res.StatusCode != http.StatusBadRequest {
+			t.Errorf("name %q: status = %d, want %d", name, res.StatusCode, http.StatusBadRequest)
+		}
+	}
+}
+
+// The limit is counted in runes. Thai is three bytes per character, so a byte-based
+// limit would reject a name well under 60 characters.
+func TestCreateHouseholdCountsNameLengthInCharactersNotBytes(t *testing.T) {
+	h := newHarness(t)
+	sixtyThaiChars := strings.Repeat("ก", 60) // 180 bytes
+
+	res := h.signedIn(t, http.MethodPost, "/api/households", `{"name":"`+sixtyThaiChars+`"}`)
+
+	if res.StatusCode != http.StatusCreated {
+		t.Errorf("status = %d, want %d — a 60-character Thai name was rejected", res.StatusCode, http.StatusCreated)
+	}
+}
+
+func TestCreateHouseholdRejectsAnOverlongName(t *testing.T) {
+	h := newHarness(t)
+
+	res := h.signedIn(t, http.MethodPost, "/api/households", `{"name":"`+strings.Repeat("ก", 61)+`"}`)
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestCreateHouseholdTrimsSurroundingWhitespace(t *testing.T) {
+	h := newHarness(t)
+
+	res := h.signedIn(t, http.MethodPost, "/api/households", `{"name":"  บ้านเรา  "}`)
+
+	var got store.Household
+	if err := json.Unmarshal([]byte(body(t, res)), &got); err != nil {
+		t.Fatalf("decode household: %v", err)
+	}
+	if got.Name != "บ้านเรา" {
+		t.Errorf("name = %q, want it trimmed", got.Name)
+	}
+}
+
+// Household endpoints must be unreachable without a session.
+func TestHouseholdEndpointsRequireASession(t *testing.T) {
+	h := newHarness(t)
+
+	cases := []struct {
+		method, path, body string
+	}{
+		{http.MethodGet, "/api/households", ""},
+		{http.MethodPost, "/api/households", `{"name":"บ้านเรา"}`},
+	}
+	for _, c := range cases {
+		var req *http.Request
+		if c.body == "" {
+			req = httptest.NewRequest(c.method, c.path, nil)
+		} else {
+			req = httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
+		}
+		if res := h.do(req); res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, res.StatusCode, http.StatusUnauthorized)
+		}
 	}
 }
