@@ -138,6 +138,7 @@ name for code and its canonical Thai name for the UI. Use those words. Don't inv
 | [0001](docs/adr/0001-quantity-is-a-column-history-is-a-log.md) | Quantity is a mutable column; history is an append-only log |
 | [0002](docs/adr/0002-line-identity-is-the-only-identity.md) | LINE identity is the only identity |
 | [0003](docs/adr/0003-the-frontend-ships-inside-the-go-binary.md) | The frontend ships inside the Go binary |
+| [0004](docs/adr/0004-the-accessibility-floor.md) | The accessibility floor: 20px text, 4.5:1 contrast, 48px targets |
 
 If your change contradicts an ADR, say so explicitly rather than quietly working around it.
 
