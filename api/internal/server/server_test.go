@@ -361,8 +361,9 @@ func (f *fakeItems) find(itemID, userID string) (*store.Item, bool) {
 	return nil, false
 }
 
-func lowFor(threshold *int, quantity int) bool {
-	return threshold != nil && quantity <= *threshold
+// lowFor mirrors the store's isLow: either source is enough on its own.
+func lowFor(threshold *int, markedLow bool, quantity int) bool {
+	return markedLow || (threshold != nil && quantity <= *threshold)
 }
 
 func (f *fakeItems) CreateItem(_ context.Context, householdID, userID string, in store.ItemInput) (store.Item, error) {
@@ -376,7 +377,7 @@ func (f *fakeItems) CreateItem(_ context.Context, householdID, userID string, in
 	item := store.Item{
 		ID: fmt.Sprintf("item-%d", f.nextID), Name: in.Name, Unit: in.Unit,
 		Description: in.Description, LowStockThreshold: in.LowStockThreshold,
-		IsLow: lowFor(in.LowStockThreshold, 0), Icon: in.Icon,
+		IsLow: lowFor(in.LowStockThreshold, false, 0), Icon: in.Icon,
 	}
 	f.byHousehold[householdID] = append(f.byHousehold[householdID], item)
 	f.itemHousehold[item.ID] = householdID
@@ -445,8 +446,12 @@ func (f *fakeItems) AdjustQuantity(_ context.Context, itemID, userID string, cha
 			CreatedAt: f.tick(),
 		})
 	}
+	// Restocking takes the item back off the shopping list, as the store does.
+	if after > before {
+		item.MarkedLow = false
+	}
 	item.Quantity = after
-	item.IsLow = lowFor(item.LowStockThreshold, after)
+	item.IsLow = lowFor(item.LowStockThreshold, item.MarkedLow, after)
 	return *item, nil
 }
 
@@ -462,8 +467,21 @@ func (f *fakeItems) UpdateItem(_ context.Context, itemID, userID string, in stor
 	item.Unit = in.Unit
 	item.Description = in.Description
 	item.LowStockThreshold = in.LowStockThreshold
-	item.IsLow = lowFor(in.LowStockThreshold, item.Quantity)
+	item.IsLow = lowFor(in.LowStockThreshold, item.MarkedLow, item.Quantity)
 	item.Icon = in.Icon
+	return *item, nil
+}
+
+func (f *fakeItems) SetItemMarkedLow(_ context.Context, itemID, userID string, marked bool) (store.Item, error) {
+	if f.err != nil {
+		return store.Item{}, f.err
+	}
+	item, ok := f.find(itemID, userID)
+	if !ok {
+		return store.Item{}, store.ErrNotFound
+	}
+	item.MarkedLow = marked
+	item.IsLow = lowFor(item.LowStockThreshold, marked, item.Quantity)
 	return *item, nil
 }
 
@@ -1479,6 +1497,111 @@ func TestAThresholdOfZeroIsKept(t *testing.T) {
 	}
 }
 
+// --- the shopping list --------------------------------------------------------
+
+// The case a threshold cannot express: a household keeps one bottle of shampoo, so the
+// quantity is 1 the day it is bought and 1 the day it runs out.
+func TestMarkingAnItemLowByHandPutsItOnTheShoppingList(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"แชมพู","unit":"ขวด"}`)
+	if item.IsLow {
+		t.Fatal("an item with no threshold starts out low")
+	}
+
+	marked := decodeItem(t, h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/low", `{"markedLow":true}`))
+
+	if !marked.MarkedLow {
+		t.Error("MarkedLow = false after marking the item low")
+	}
+	if !marked.IsLow {
+		t.Error("IsLow = false for an item a member marked low by hand")
+	}
+}
+
+// Marking is a statement of fact, not a toggle, so a retry must not undo it.
+func TestMarkingAnItemLowTwiceLeavesItMarked(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"แชมพู","unit":"ขวด"}`)
+
+	h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/low", `{"markedLow":true}`)
+	again := decodeItem(t, h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/low", `{"markedLow":true}`))
+
+	if !again.MarkedLow {
+		t.Error("marking an already-marked item took it off the shopping list")
+	}
+}
+
+func TestUnmarkingTakesAnItemOffTheShoppingList(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"แชมพู","unit":"ขวด"}`)
+
+	h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/low", `{"markedLow":true}`)
+	cleared := decodeItem(t, h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/low", `{"markedLow":false}`))
+
+	if cleared.MarkedLow || cleared.IsLow {
+		t.Errorf("item = %+v, want neither marked nor low", cleared)
+	}
+}
+
+// Nobody has to remember to clear the mark after the shop: buying the thing is what
+// takes it off the list.
+func TestRestockingClearsAHandMadeMark(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"แชมพู","unit":"ขวด"}`)
+	h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/low", `{"markedLow":true}`)
+
+	restocked := decodeItem(t, h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity", `{"delta":1}`))
+
+	if restocked.MarkedLow {
+		t.Error("MarkedLow survived a restock")
+	}
+	if restocked.IsLow {
+		t.Error("IsLow survived a restock")
+	}
+}
+
+// Only an increase clears it. Taking one more out of the cupboard is not the moment
+// someone stopped needing to buy more.
+func TestUsingSomeUpKeepsAHandMadeMark(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"แชมพู","unit":"ขวด"}`)
+	h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity", `{"quantity":3}`)
+	h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/low", `{"markedLow":true}`)
+
+	used := decodeItem(t, h.signedIn(t, http.MethodPost, "/api/items/"+item.ID+"/quantity", `{"delta":-1}`))
+
+	if !used.MarkedLow || !used.IsLow {
+		t.Errorf("item = %+v, want it still on the shopping list", used)
+	}
+}
+
+// Editing an item is not a statement about how much of it is left, so it must not quietly
+// take the item off the list.
+func TestEditingAnItemKeepsAHandMadeMark(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"แชมพู","unit":"ขวด"}`)
+	h.signedIn(t, http.MethodPut, "/api/items/"+item.ID+"/low", `{"markedLow":true}`)
+
+	edited := decodeItem(t, h.signedIn(t, http.MethodPut, "/api/items/"+item.ID,
+		`{"name":"แชมพูเด็ก","unit":"ขวด"}`))
+
+	if !edited.MarkedLow || !edited.IsLow {
+		t.Errorf("item = %+v, want it still on the shopping list", edited)
+	}
+}
+
+func TestMarkingAnItemInAnotherHouseholdIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	item := h.newItem(t, h.withHousehold(t), `{"name":"แชมพู","unit":"ขวด"}`)
+	outsider := h.asUser(t, "line-outsider", "คนนอก")
+
+	res := h.doAs(t, outsider, http.MethodPut, "/api/items/"+item.ID+"/low", `{"markedLow":true}`)
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+}
+
 func TestNewItemEndpointsRequireASession(t *testing.T) {
 	h := newHarness(t)
 
@@ -1486,6 +1609,7 @@ func TestNewItemEndpointsRequireASession(t *testing.T) {
 		{http.MethodGet, "/api/items/some-id/movements", ""},
 		{http.MethodPut, "/api/items/some-id", `{"name":"น้ำปลา","unit":"ขวด"}`},
 		{http.MethodDelete, "/api/items/some-id", ""},
+		{http.MethodPut, "/api/items/some-id/low", `{"markedLow":true}`},
 	} {
 		var req *http.Request
 		if c.body == "" {

@@ -68,6 +68,30 @@ _Avoid_: invitation code, join code, token, link
 
 **Low-stock threshold**:
 An optional quantity per item. When an item's quantity falls to or below it, the item is
-*low* and is surfaced visually. An item without one is never low.
+*low*. One of the two things that can make an item low, not the only one — see *Marked
+low*. An item with no threshold is never low on the quantity's account alone.
 _Thai_: จำนวนขั้นต่ำ
 _Avoid_: reorder point, minimum, par level, alert level
+
+**Marked low**:
+A member's statement that an item is running out, made by hand and regardless of any
+threshold. It exists for what a threshold cannot express: a household keeps one bottle of
+shampoo, so the quantity reads 1 the day it is bought and 1 the day it is empty. Cleared
+by restocking the item, not by shopping for it.
+_Thai_: ทำเครื่องหมายว่าใกล้หมด
+_Avoid_: flagged, starred, needed, pinned, wanted
+
+**Low**:
+An item that either is at or below its low-stock threshold, or has been marked low. Either
+source alone is enough. Low items sort to the top of the stock and make up the shopping
+list.
+_Thai_: ใกล้หมด
+_Avoid_: running out, short, depleted, below par
+
+**Shopping list**:
+The low items, read as one list to take to the shop. A view over the stock rather than a
+thing anyone keeps: an item joins it by becoming low and leaves it by being restocked,
+never by being ticked off. There is no separate list to edit, and nothing to reconcile
+when two members shop at once.
+_Thai_: รายการที่ต้องซื้อ
+_Avoid_: basket, cart, to-buy list, wishlist, needs

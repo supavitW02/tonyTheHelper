@@ -23,6 +23,7 @@ export default function ItemRow({
   onSave,
   onDelete,
   onPhoto,
+  onMarkLow,
 }: {
   item: Item
   onStep: (delta: number) => void
@@ -30,6 +31,7 @@ export default function ItemRow({
   onSave: (input: ItemInput) => Promise<void>
   onDelete: () => Promise<void>
   onPhoto: (file: File) => Promise<void>
+  onMarkLow: (markedLow: boolean) => Promise<void>
 }) {
   const [panel, setPanel] = useState<Panel>(null)
   const toggle = (next: Exclude<Panel, null>) => setPanel((open) => (open === next ? null : next))
@@ -80,6 +82,7 @@ export default function ItemRow({
         <SmallAction onClick={() => toggle('edit')} expanded={panel === 'edit'}>
           แก้ไข
         </SmallAction>
+        <MarkLowAction item={item} onMarkLow={onMarkLow} />
       </div>
 
       {panel === 'total' && (
@@ -224,6 +227,52 @@ function SmallAction({
       }`}
     >
       {children}
+    </button>
+  )
+}
+
+/**
+ * Putting this item on the shopping list by hand, or taking it back off.
+ *
+ * Shown only where it has something to do, which is what keeps it from contradicting the
+ * badge above it. An item that is low because its quantity reached its threshold is
+ * already on the list, and offering to add it would be a button that changes nothing
+ * visible — so it is offered when the item is not low at all, and offered in reverse
+ * whenever a mark exists, so a mark is always something the person who made it can undo.
+ *
+ * aria-pressed rather than aria-expanded: this is a state being flipped, not a panel
+ * being opened, and it is the only control in the row that is not the latter.
+ */
+function MarkLowAction({
+  item,
+  onMarkLow,
+}: {
+  item: Item
+  onMarkLow: (markedLow: boolean) => Promise<void>
+}) {
+  const [busy, setBusy] = useState(false)
+
+  if (!item.markedLow && item.isLow) return null
+
+  return (
+    <button
+      type="button"
+      aria-pressed={item.markedLow}
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true)
+        try {
+          await onMarkLow(!item.markedLow)
+        } finally {
+          setBusy(false)
+        }
+      }}
+      className={`-mx-3 inline-flex min-h-12 items-center gap-2 rounded-lg px-3 underline underline-offset-4 disabled:text-slate-500 disabled:no-underline ${
+        item.markedLow ? 'bg-brand-100 font-semibold text-accent-800' : 'text-accent-700'
+      }`}
+    >
+      <span aria-hidden="true">🛒</span>
+      {item.markedLow ? 'ไม่ต้องซื้อแล้ว' : 'ใส่รายการซื้อ'}
     </button>
   )
 }

@@ -369,8 +369,13 @@ type Item struct {
 	// LowStockThreshold is optional. Absent means the item is never low: most things a
 	// household keeps are not worth tracking that closely.
 	LowStockThreshold *int `json:"lowStockThreshold,omitempty"`
-	// IsLow is derived in SQL, both to sort low items to the top and so the UI never
-	// has to repeat the comparison and risk disagreeing with the ordering.
+	// MarkedLow is a member's own declaration that this item is running out, made
+	// regardless of the threshold. It is what puts an item a household keeps exactly one
+	// of onto the shopping list (ADR-0006).
+	MarkedLow bool `json:"markedLow"`
+	// IsLow is derived in SQL from the threshold and the mark together, both to sort low
+	// items to the top and so the UI never has to repeat the comparison and risk
+	// disagreeing with the ordering.
 	IsLow bool `json:"isLow"`
 	// HasImage rather than the path itself: where an item's photo lives in object
 	// storage is not the browser's business, and the URL is minted per request anyway.
@@ -404,7 +409,9 @@ type Movement struct {
 // itemColumns is the projection every item read shares, including the derived low flag.
 const itemColumns = `i.id, i.name, i.unit, coalesce(i.description, ''), i.quantity,
 	i.low_stock_threshold,
-	(i.low_stock_threshold is not null and i.quantity <= i.low_stock_threshold) as is_low,
+	(i.marked_low_at is not null) as marked_low,
+	(i.marked_low_at is not null
+		or (i.low_stock_threshold is not null and i.quantity <= i.low_stock_threshold)) as is_low,
 	(i.image_path is not null) as has_image,
 	coalesce(i.icon, '')`
 
@@ -427,7 +434,7 @@ func (db *DB) CreateItem(ctx context.Context, householdID, userID string, in Ite
 	var i Item
 	err := db.pool.QueryRow(ctx, insertItem,
 		householdID, in.Name, in.Unit, in.Description, in.LowStockThreshold, userID, in.Icon).
-		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage, &i.Icon)
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.MarkedLow, &i.IsLow, &i.HasImage, &i.Icon)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -464,7 +471,7 @@ func (db *DB) ItemsForHousehold(ctx context.Context, householdID, userID string)
 	for rows.Next() {
 		var i Item
 		if err := rows.Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity,
-			&i.LowStockThreshold, &i.IsLow, &i.HasImage, &i.Icon); err != nil {
+			&i.LowStockThreshold, &i.MarkedLow, &i.IsLow, &i.HasImage, &i.Icon); err != nil {
 			return nil, fmt.Errorf("store: scan item: %w", err)
 		}
 		items = append(items, i)
@@ -519,6 +526,7 @@ type QuantityChange struct {
 
 const lockItemForUpdate = `
 select i.quantity, i.name, i.unit, coalesce(i.description, ''), i.low_stock_threshold,
+       (i.marked_low_at is not null) as marked_low,
        (i.image_path is not null) as has_image, coalesce(i.icon, '')
 from items i
 join household_members m on m.household_id = i.household_id and m.user_id = $2
@@ -526,7 +534,14 @@ where i.id = $1 and i.deleted_at is null
 for update of i`
 
 const updateItemQuantity = `
-update items set quantity = $2, updated_at = now() where id = $1`
+update items
+set quantity = $2,
+    -- $3 says the quantity went up, which is the only thing that clears a hand-made mark:
+    -- restocking is what takes an item off the shopping list, so nobody has to remember
+    -- to un-mark it after the shop (ADR-0006).
+    marked_low_at = case when $3 then null else marked_low_at end,
+    updated_at = now()
+where id = $1`
 
 const insertMovement = `
 insert into stock_movements (item_id, user_id, quantity_before, quantity_after, note)
@@ -551,7 +566,7 @@ func (db *DB) AdjustQuantity(ctx context.Context, itemID, userID string, change 
 	item := Item{ID: itemID}
 	err = tx.QueryRow(ctx, lockItemForUpdate, itemID, userID).
 		Scan(&before, &item.Name, &item.Unit, &item.Description, &item.LowStockThreshold,
-			&item.HasImage, &item.Icon)
+			&item.MarkedLow, &item.HasImage, &item.Icon)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -569,11 +584,18 @@ func (db *DB) AdjustQuantity(ctx context.Context, itemID, userID string, change 
 	// is no movement to record, because nothing moved.
 	if after == before {
 		item.Quantity = before
-		item.IsLow = isLow(item.LowStockThreshold, before)
+		item.IsLow = isLow(item.LowStockThreshold, item.MarkedLow, before)
 		return item, tx.Commit(ctx)
 	}
 
-	if _, err := tx.Exec(ctx, updateItemQuantity, itemID, after); err != nil {
+	// Restocking takes the item off the shopping list. Only an increase does it: taking
+	// one more out of a cupboard is not the moment someone stopped needing to buy it.
+	restocked := after > before
+	if restocked {
+		item.MarkedLow = false
+	}
+
+	if _, err := tx.Exec(ctx, updateItemQuantity, itemID, after, restocked); err != nil {
 		return Item{}, fmt.Errorf("store: update quantity: %w", err)
 	}
 	if _, err := tx.Exec(ctx, insertMovement, itemID, userID, before, after, change.Note); err != nil {
@@ -585,14 +607,17 @@ func (db *DB) AdjustQuantity(ctx context.Context, itemID, userID string, change 
 	}
 
 	item.Quantity = after
-	item.IsLow = isLow(item.LowStockThreshold, after)
+	item.IsLow = isLow(item.LowStockThreshold, item.MarkedLow, after)
 	return item, nil
 }
 
 // isLow mirrors the SQL expression in itemColumns. The two must agree, or the list
 // ordering and the badge would disagree with each other.
-func isLow(threshold *int, quantity int) bool {
-	return threshold != nil && quantity <= *threshold
+//
+// Two independent sources, either of which is enough: the threshold, and a member saying
+// so by hand (ADR-0006).
+func isLow(threshold *int, markedLow bool, quantity int) bool {
+	return markedLow || (threshold != nil && quantity <= *threshold)
 }
 
 // targetQuantity resolves a requested change to a final quantity, floored at zero so that
@@ -623,7 +648,7 @@ func (db *DB) UpdateItem(ctx context.Context, itemID, userID string, in ItemInpu
 	var i Item
 	err := db.pool.QueryRow(ctx, updateItemFields,
 		itemID, userID, in.Name, in.Unit, in.Description, in.LowStockThreshold, in.Icon).
-		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage, &i.Icon)
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.MarkedLow, &i.IsLow, &i.HasImage, &i.Icon)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -633,6 +658,41 @@ func (db *DB) UpdateItem(ctx context.Context, itemID, userID string, in ItemInpu
 			return Item{}, ErrNotFound
 		}
 		return Item{}, fmt.Errorf("store: update item: %w", err)
+	}
+	return i, nil
+}
+
+const setItemMarkedLow = `
+update items i
+set marked_low_at = case when $3 then coalesce(i.marked_low_at, now()) else null end,
+    updated_at = now()
+where i.id = $1
+  and i.deleted_at is null
+  and exists (select 1 from household_members m where m.household_id = i.household_id and m.user_id = $2)
+returning ` + itemColumns
+
+// SetItemMarkedLow puts an item on the shopping list by hand, or takes it back off.
+//
+// It writes no movement. A movement records a change to a *quantity* (ADR-0001), and
+// nothing here moves any stock — the cupboard holds exactly what it held before, someone
+// has only said what they know about it.
+//
+// Marking an item that is already marked keeps the original timestamp rather than
+// refreshing it, so the column keeps answering "since when" rather than "most recently
+// confirmed".
+func (db *DB) SetItemMarkedLow(ctx context.Context, itemID, userID string, marked bool) (Item, error) {
+	var i Item
+	err := db.pool.QueryRow(ctx, setItemMarkedLow, itemID, userID, marked).
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.MarkedLow, &i.IsLow, &i.HasImage, &i.Icon)
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Item{}, ErrNotFound
+	case err != nil:
+		if isInvalidUUID(err) {
+			return Item{}, ErrNotFound
+		}
+		return Item{}, fmt.Errorf("store: set item marked low: %w", err)
 	}
 	return i, nil
 }
@@ -885,7 +945,7 @@ returning ` + itemColumns
 func (db *DB) SetItemImage(ctx context.Context, itemID, userID, path string) (Item, error) {
 	var i Item
 	err := db.pool.QueryRow(ctx, setImagePath, itemID, userID, path).
-		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.IsLow, &i.HasImage, &i.Icon)
+		Scan(&i.ID, &i.Name, &i.Unit, &i.Description, &i.Quantity, &i.LowStockThreshold, &i.MarkedLow, &i.IsLow, &i.HasImage, &i.Icon)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):

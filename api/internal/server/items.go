@@ -161,6 +161,32 @@ func (d Deps) updateItem(w http.ResponseWriter, r *http.Request, user store.User
 	writeJSON(w, http.StatusOK, item)
 }
 
+type markedLowRequest struct {
+	MarkedLow bool `json:"markedLow"`
+}
+
+// setItemMarkedLow puts an item on the shopping list by hand, or takes it back off.
+//
+// PUT rather than POST because the body states what the flag should be, not what to do to
+// it: a request that arrives twice — the phone that retried on a flaky train — leaves the
+// item in the same state as one that arrives once, and two family members who both notice
+// the shampoo is nearly gone cannot mark it twice between them.
+func (d Deps) setItemMarkedLow(w http.ResponseWriter, r *http.Request, user store.User) {
+	var body markedLowRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed request body")
+		return
+	}
+
+	item, err := d.Items.SetItemMarkedLow(r.Context(), r.PathValue("itemId"), user.ID, body.MarkedLow)
+	if err != nil {
+		d.itemError(w, err, "set item marked low")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, item)
+}
+
 // deleteItem soft-deletes an item, keeping its history readable.
 func (d Deps) deleteItem(w http.ResponseWriter, r *http.Request, user store.User) {
 	if err := d.Items.DeleteItem(r.Context(), r.PathValue("itemId"), user.ID); err != nil {
