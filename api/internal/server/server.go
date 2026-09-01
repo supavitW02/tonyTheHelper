@@ -51,6 +51,7 @@ type Items interface {
 	UnitsForHousehold(ctx context.Context, householdID, userID string) ([]string, error)
 	AdjustQuantity(ctx context.Context, itemID, userID string, change store.QuantityChange) (store.Item, error)
 	UpdateItem(ctx context.Context, itemID, userID string, in store.ItemInput) (store.Item, error)
+	SetItemMarkedLow(ctx context.Context, itemID, userID string, marked bool) (store.Item, error)
 	DeleteItem(ctx context.Context, itemID, userID string) error
 	MovementsForItem(ctx context.Context, itemID, userID string) ([]store.Movement, error)
 	MovementsForHousehold(ctx context.Context, householdID, userID string, filter store.MovementFilter) ([]store.HouseholdMovement, error)
@@ -100,6 +101,7 @@ func New(deps Deps) http.Handler {
 	mux.HandleFunc("POST /api/households/{householdId}/items", deps.requireUser(deps.createItem))
 	mux.HandleFunc("POST /api/items/{itemId}/quantity", deps.requireUser(deps.adjustQuantity))
 	mux.HandleFunc("PUT /api/items/{itemId}", deps.requireUser(deps.updateItem))
+	mux.HandleFunc("PUT /api/items/{itemId}/low", deps.requireUser(deps.setItemMarkedLow))
 	mux.HandleFunc("DELETE /api/items/{itemId}", deps.requireUser(deps.deleteItem))
 	mux.HandleFunc("GET /api/items/{itemId}/movements", deps.requireUser(deps.listMovements))
 	mux.HandleFunc("GET /api/households/{householdId}/movements", deps.requireUser(deps.listHouseholdMovements))

@@ -4,6 +4,7 @@ import {
   adjustQuantity,
   deleteItem,
   getItems,
+  setItemMarkedLow,
   updateItem,
   uploadItemPhoto,
   type Household,
@@ -16,7 +17,8 @@ import HistoryPanel from './HistoryPanel'
 import ItemRow from './ItemRow'
 import MembersPanel from './MembersPanel'
 import RenameHousehold from './RenameHousehold'
-import { Avatar, Dialog, inputClass, linkActionClass, Notice, primaryButtonClass } from './ui'
+import ShoppingList from './ShoppingList'
+import { Avatar, Dialog, inputClass, linkActionClass, Notice, primaryButtonClass, secondaryButtonClass } from './ui'
 
 /**
  * The two things this screen is for day to day.
@@ -78,6 +80,7 @@ export default function HouseholdScreen({
   const [units, setUnits] = useState<string[]>([])
   const [adding, setAdding] = useState(false)
   const [renaming, setRenaming] = useState(false)
+  const [shopping, setShopping] = useState(false)
   const [query, setQuery] = useState('')
   const [error, setError] = useState<string | null>(null)
   // Requests in flight per item. While any are outstanding the displayed quantity is
@@ -168,6 +171,14 @@ export default function HouseholdScreen({
   const visible = useMemo(() => (items ?? []).filter((i) => matches(i, query)), [items, query])
   const searching = query.trim() !== ''
 
+  /**
+   * What the shopping list shows: every low item, however it became low.
+   *
+   * Taken from the full list rather than from `visible`, because the search box narrows
+   * what is on screen and the shop still has to be told about the rest.
+   */
+  const lowItems = useMemo(() => (items ?? []).filter((i) => i.isLow), [items])
+
   return (
     <div className="flex flex-col gap-6">
       <header className="flex items-start gap-3">
@@ -223,6 +234,26 @@ export default function HouseholdScreen({
 
       <div role="tabpanel" id="panel-items" aria-labelledby="tab-items" hidden={tab !== 'items'}>
         <div className="flex flex-col gap-4">
+          {/* First, and in the same place whether or not anything is low: this is what
+              someone opens the app for on the way out of the door, and an errand that
+              moves around is an errand that has to be hunted for. The count is on the
+              button so the list does not have to be opened to learn it is empty.
+
+              Labelled as well as drawn. An icon alone would be a guess for the person
+              this app is for, and 🛒 has no accessible name of its own. */}
+          {items !== null && items.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShopping(true)}
+              className={`${secondaryButtonClass} flex w-full items-center justify-center gap-3`}
+            >
+              <span aria-hidden="true" className="text-2xl leading-none">
+                🛒
+              </span>
+              รายการที่ต้องซื้อ{lowItems.length > 0 && ` (${lowItems.length})`}
+            </button>
+          )}
+
           {/* Above the list, not below it. Below the list this sat off the bottom of the
               screen once a household had a dozen items. */}
           {items !== null && (
@@ -300,6 +331,18 @@ export default function HouseholdScreen({
                     // chips offered when adding the next item come from that list.
                     reload().catch(() => {})
                   }}
+                  onMarkLow={async (markedLow) => {
+                    setError(null)
+                    try {
+                      const saved = await setItemMarkedLow(item.id, markedLow)
+                      // Re-sorted for the same reason editing a threshold is: the item
+                      // just became low, and low items belong at the top of the list.
+                      setItems((current) => sortItems((current ?? []).map((i) => (i.id === saved.id ? saved : i))))
+                    } catch (err) {
+                      console.error('mark low failed', err)
+                      setError('บันทึกรายการที่ต้องซื้อไม่สำเร็จ')
+                    }
+                  }}
                   onPhoto={async (file) => {
                     const saved = await uploadItemPhoto(item.id, file)
                     setItems((current) => (current ?? []).map((i) => (i.id === saved.id ? saved : i)))
@@ -339,6 +382,8 @@ export default function HouseholdScreen({
           </div>
         </Dialog>
       )}
+
+      {shopping && <ShoppingList items={lowItems} onClose={() => setShopping(false)} />}
 
       {adding && (
         <AddItemForm

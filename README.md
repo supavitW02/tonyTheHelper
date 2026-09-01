@@ -16,10 +16,16 @@ and no keyboard needed for anything done daily.
 - **Add items** with a name, a free-text unit, and an optional description and photo.
 - **Adjust quantities** with large plus and minus buttons, or set a total after shopping.
 - **See who changed what**, when, and why — every change is recorded permanently.
-- **Flag items running low** against an optional per-item threshold.
+- **Flag items running low** against an optional per-item threshold, or by hand for the
+  things a household keeps one of, where no threshold can tell full from nearly empty.
+- **Read the shopping list** — every low item, with how much is left — on the way out of
+  the door. Restocking an item takes it off; nothing has to be ticked off by hand.
 
-Deliberately out of scope: passwords, expiry dates, push notifications, shopping lists,
-categories, barcode scanning, and storage locations.
+Deliberately out of scope: passwords, expiry dates, push notifications, categories,
+barcode scanning, and storage locations. The shopping list is not an exception to that
+list — it is a *view* of the items that are already low, with nothing to edit and nothing
+to tick off. A shopping list anyone maintains by hand remains out of scope, for the reason
+in [ADR-0006](docs/adr/0006-low-is-a-threshold-or-a-persons-word.md).
 
 ## Stack
 

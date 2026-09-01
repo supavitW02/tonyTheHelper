@@ -815,6 +815,245 @@ func TestLowItemsSortToTheTop(t *testing.T) {
 	}
 }
 
+// --- marking an item low by hand -------------------------------------------------
+
+// The case a threshold cannot reach: one bottle of shampoo reads 1 the day it is bought
+// and 1 the day it runs out, so only a person can say it is nearly gone.
+func TestMarkingAnItemLowByHandMakesItLow(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-mark", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "แชมพู", Unit: "ขวด"})
+
+	marked, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, true)
+	if err != nil {
+		t.Fatalf("SetItemMarkedLow: %v", err)
+	}
+	if !marked.MarkedLow || !marked.IsLow {
+		t.Errorf("item = %+v, want it marked and low", marked)
+	}
+
+	// And the list read agrees with what the write returned.
+	items, err := db.ItemsForHousehold(ctx, h.ID, u.ID)
+	if err != nil {
+		t.Fatalf("ItemsForHousehold: %v", err)
+	}
+	if !items[0].MarkedLow || !items[0].IsLow {
+		t.Errorf("listed item = %+v, want it marked and low", items[0])
+	}
+}
+
+func TestUnmarkingAnItemTakesItOffTheShoppingList(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-unmark", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "แชมพู", Unit: "ขวด"})
+
+	if _, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, true); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	cleared, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, false)
+	if err != nil {
+		t.Fatalf("unmark: %v", err)
+	}
+	if cleared.MarkedLow || cleared.IsLow {
+		t.Errorf("item = %+v, want neither marked nor low", cleared)
+	}
+}
+
+// Marking is not a toggle: two people noticing the same empty bottle must not cancel
+// each other out.
+func TestMarkingAnAlreadyMarkedItemLeavesItMarked(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-remark", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "แชมพู", Unit: "ขวด"})
+
+	if _, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, true); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	again, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, true)
+	if err != nil {
+		t.Fatalf("mark again: %v", err)
+	}
+	if !again.MarkedLow {
+		t.Error("marking an already-marked item cleared it")
+	}
+}
+
+// Buying the thing is what takes it off the list, so nobody has to remember to.
+func TestRestockingClearsAHandMadeMark(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-restock", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "แชมพู", Unit: "ขวด"})
+	if _, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, true); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+
+	up := 1
+	restocked, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Delta: &up})
+	if err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+	if restocked.MarkedLow || restocked.IsLow {
+		t.Errorf("item = %+v, want the mark cleared by the restock", restocked)
+	}
+
+	items, _ := db.ItemsForHousehold(ctx, h.ID, u.ID)
+	if items[0].MarkedLow {
+		t.Error("the mark is cleared in the returned item but not in the row")
+	}
+}
+
+// Only an increase clears it: using one more up is not the moment someone stopped
+// needing to buy more.
+func TestUsingSomeUpKeepsAHandMadeMark(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-useup", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "แชมพู", Unit: "ขวด"})
+
+	three := 3
+	if _, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Absolute: &three}); err != nil {
+		t.Fatalf("stock up: %v", err)
+	}
+	if _, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, true); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+
+	down := -1
+	used, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Delta: &down})
+	if err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+	if !used.MarkedLow || !used.IsLow {
+		t.Errorf("item = %+v, want it still on the shopping list", used)
+	}
+}
+
+// A no-op change writes no movement, and must not disturb the mark either.
+func TestAQuantityChangeThatChangesNothingKeepsTheMark(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-noop", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "แชมพู", Unit: "ขวด"})
+	if _, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, true); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+
+	down := -1
+	same, err := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Delta: &down})
+	if err != nil {
+		t.Fatalf("AdjustQuantity: %v", err)
+	}
+	if !same.MarkedLow || !same.IsLow {
+		t.Errorf("item = %+v, want minus at zero to leave the mark alone", same)
+	}
+}
+
+// Marking moves no stock, so it is not a movement (ADR-0001).
+func TestMarkingAnItemLowRecordsNoMovement(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-nomv", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "แชมพู", Unit: "ขวด"})
+
+	if _, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, true); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	movements, err := db.MovementsForItem(ctx, item.ID, u.ID)
+	if err != nil {
+		t.Fatalf("MovementsForItem: %v", err)
+	}
+	if len(movements) != 0 {
+		t.Errorf("got %d movements, want none", len(movements))
+	}
+}
+
+// An item well above its threshold can still be marked, and stays low until restocked —
+// the two sources are independent.
+func TestAMarkOutranksAThresholdThatIsNotMet(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-both", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID,
+		store.ItemInput{Name: "น้ำปลา", Unit: "ขวด", LowStockThreshold: threshold(1)})
+
+	five := 5
+	stocked, _ := db.AdjustQuantity(ctx, item.ID, u.ID, store.QuantityChange{Absolute: &five})
+	if stocked.IsLow {
+		t.Fatal("5 with a threshold of 1 is reported low")
+	}
+
+	marked, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, true)
+	if err != nil {
+		t.Fatalf("SetItemMarkedLow: %v", err)
+	}
+	if !marked.IsLow {
+		t.Error("a marked item above its threshold is not low")
+	}
+}
+
+// Unmarking says nothing about the threshold, which keeps deciding on its own.
+func TestUnmarkingLeavesAThresholdStillDeciding(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-thresh-left", "พ่อ")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID,
+		store.ItemInput{Name: "น้ำปลา", Unit: "ขวด", LowStockThreshold: threshold(2)})
+
+	if _, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, true); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	cleared, err := db.SetItemMarkedLow(ctx, item.ID, u.ID, false)
+	if err != nil {
+		t.Fatalf("unmark: %v", err)
+	}
+	if cleared.MarkedLow {
+		t.Error("MarkedLow survived unmarking")
+	}
+	// Quantity is still 0, which is at or below the threshold of 2.
+	if !cleared.IsLow {
+		t.Error("IsLow = false, but the threshold alone should still make this item low")
+	}
+}
+
+func TestSetItemMarkedLowRefusesANonMember(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-mark-owner", "พ่อ")
+	outsider, _ := household(t, db, "U-mark-outsider", "คนนอก")
+	item, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "แชมพู", Unit: "ขวด"})
+
+	if _, err := db.SetItemMarkedLow(ctx, item.ID, outsider.ID, true); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// A marked item sorts to the top for the same reason a threshold-low one does: it is
+// what the shopper needs to see.
+func TestAMarkedItemSortsToTheTop(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	u, h := household(t, db, "U-mark-order", "พ่อ")
+
+	// "ก" sorts before "ฮ", so without the low-first rule ก would come first.
+	_, _ = db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "ก ของปกติ", Unit: "ชิ้น"})
+	marked, _ := db.CreateItem(ctx, h.ID, u.ID, store.ItemInput{Name: "ฮ แชมพู", Unit: "ขวด"})
+	if _, err := db.SetItemMarkedLow(ctx, marked.ID, u.ID, true); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+
+	items, err := db.ItemsForHousehold(ctx, h.ID, u.ID)
+	if err != nil {
+		t.Fatalf("ItemsForHousehold: %v", err)
+	}
+	if items[0].ID != marked.ID {
+		t.Errorf("first item is %q, want the marked one", items[0].Name)
+	}
+}
+
 // --- item photos ----------------------------------------------------------------
 
 func TestSetItemImageMarksTheItemAsHavingOne(t *testing.T) {

@@ -97,7 +97,10 @@ export type Item = {
   quantity: number
   /** Absent means the item is never low. */
   lowStockThreshold?: number
-  /** Derived by the server, so the UI never disagrees with the list ordering. */
+  /** A member said by hand that this is running out, whatever the threshold says. */
+  markedLow: boolean
+  /** Threshold or mark, whichever fires. Derived by the server, so the UI never
+   *  disagrees with the list ordering. */
   isLow: boolean
   /** Whether a photo exists. The storage path is deliberately not exposed. */
   hasImage: boolean
@@ -161,6 +164,20 @@ export const adjustQuantity = (itemId: string, change: { delta?: number; quantit
   request<Item>(`/api/items/${itemId}/quantity`, {
     method: 'POST',
     body: JSON.stringify(change),
+  })
+
+/**
+ * Puts an item on the shopping list by hand, or takes it back off.
+ *
+ * For the things a household keeps exactly one of — a bottle of shampoo sits at 1 from
+ * the day it is bought until the day it is empty, so no threshold can tell the two apart.
+ * PUT, not POST: the body says what the flag should be, so a retry is harmless and two
+ * people noticing the same empty bottle cannot cancel each other out.
+ */
+export const setItemMarkedLow = (itemId: string, markedLow: boolean) =>
+  request<Item>(`/api/items/${itemId}/low`, {
+    method: 'PUT',
+    body: JSON.stringify({ markedLow }),
   })
 
 /** The URL an item's photo is served from. Redirects to a freshly signed storage URL. */
