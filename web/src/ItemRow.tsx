@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { getMovements, itemImageUrl, type Item, type ItemInput, type Movement } from './api'
+import { formatWhen } from './formatWhen'
 import IconPicker from './IconPicker'
 import QuantityDiff from './QuantityDiff'
 import { dangerButtonClass, inputClass, primaryButtonClass, secondaryButtonClass } from './ui'
@@ -327,18 +328,21 @@ function History({ itemId, unit, quantity }: { itemId: string; unit: string; qua
       {movements && movements.length > 0 && (
         <ul className="flex flex-col gap-3">
           {movements.map((m) => (
-            <li key={m.id} className="flex flex-col">
-              <span className="break-words">
-                <strong className="font-medium">{m.actorName}</strong>{' '}
+            <li key={m.id} className="flex flex-col gap-1">
+              {/* Who and when, pushed to opposite ends of one line. Stacked on adjacent
+                  lines they read as one run of text and the eye has to separate them. */}
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                <strong className="font-medium break-words">{m.actorName}</strong>
+                <span className="whitespace-nowrap text-slate-600">{formatWhen(m.createdAt)}</span>
+              </div>
+              {/* The change, with the direction leading it. */}
+              <div className="flex flex-wrap items-center gap-x-2">
+                <QuantityDiff before={m.quantityBefore} after={m.quantityAfter} />
                 <span className="whitespace-nowrap">
                   {m.quantityBefore} → {m.quantityAfter} {unit}
-                </span>{' '}
-                <QuantityDiff before={m.quantityBefore} after={m.quantityAfter} />
-              </span>
-              <span className="text-slate-600">
-                {new Date(m.createdAt).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}
-              </span>
-              {m.note && <span className="text-slate-600">“{m.note}”</span>}
+                </span>
+              </div>
+              {m.note && <span className="break-words text-slate-600">“{m.note}”</span>}
             </li>
           ))}
         </ul>
