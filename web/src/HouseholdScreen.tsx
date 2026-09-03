@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
   adjustQuantity,
@@ -12,27 +12,13 @@ import {
   type User,
 } from './api'
 import AddItemForm from './AddItemForm'
-import DeleteHousehold from './DeleteHousehold'
+import type { Tab } from './BottomNav'
 import HistoryPanel from './HistoryPanel'
 import ItemRow from './ItemRow'
-import MembersPanel from './MembersPanel'
-import RenameHousehold from './RenameHousehold'
+import ScrollToTop from './ScrollToTop'
+import SettingsPanel from './SettingsPanel'
 import ShoppingList from './ShoppingList'
-import { Avatar, Dialog, inputClass, linkActionClass, Notice, primaryButtonClass, secondaryButtonClass } from './ui'
-
-/**
- * The two things this screen is for day to day.
- *
- * Members used to be a third tab, which cost the strip a whole extra row at phone width —
- * three of these labels do not fit across 375px. It is a rare errand, so it moved next to
- * the other rare errand, creating a household, and opens as a dialog from there.
- */
-const TABS = [
-  { id: 'items', label: 'ของใช้' },
-  { id: 'history', label: 'ประวัติของใช้' },
-] as const
-
-type Tab = (typeof TABS)[number]['id']
+import { Avatar, inputClass, linkActionClass, Notice, primaryButtonClass, secondaryButtonClass } from './ui'
 
 /**
  * Orders items the way the server does: low stock first so it is noticed before running
@@ -58,35 +44,44 @@ function matches(item: Item, query: string): boolean {
   return item.name.toLowerCase().includes(q) || item.unit.toLowerCase().includes(q)
 }
 
-/** The household someone lands in: its stock, and the controls to change it. */
+/**
+ * The household someone lands in: its stock, its history, and its settings.
+ *
+ * All three panels live here rather than being split across the app, because all three
+ * are about one household and two of them need the item list — the settings panel counts
+ * it, and the delete confirmation refuses to be vague about what is being thrown away.
+ * Which panel is showing is decided further up, by the bar at the bottom of the screen.
+ */
 export default function HouseholdScreen({
   household,
+  households,
   user,
+  tab,
   onRenamed,
   onDeleted,
-  membersOpen,
-  onCloseMembers,
+  onSwitch,
+  onCreateNew,
 }: {
   household: Household
+  /** Every household the user belongs to, offered for switching under settings. */
+  households: Household[]
   user: User
+  /** Which panel the bottom bar is currently pointing at. */
+  tab: Tab
   onRenamed: (household: Household) => void
   onDeleted: (householdId: string) => void
-  /** Driven from the top of the screen, beside the create-household button. */
-  membersOpen: boolean
-  onCloseMembers: () => void
+  onSwitch: (householdId: string) => void
+  onCreateNew: () => void
 }) {
-  const [tab, setTab] = useState<Tab>('items')
   const [items, setItems] = useState<Item[] | null>(null)
   const [units, setUnits] = useState<string[]>([])
   const [adding, setAdding] = useState(false)
-  const [renaming, setRenaming] = useState(false)
   const [shopping, setShopping] = useState(false)
   const [query, setQuery] = useState('')
   const [error, setError] = useState<string | null>(null)
   // Requests in flight per item. While any are outstanding the displayed quantity is
   // optimistic, so a rapid tapper is not left waiting on the network between taps.
   const [pending, setPending] = useState<Record<string, number>>({})
-  const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({})
 
   const reload = useCallback(async () => {
     const { items, units } = await getItems(household.id)
@@ -156,18 +151,6 @@ export default function HouseholdScreen({
     }
   }
 
-  /** Left/right arrows move between tabs, which is what the tab role promises. */
-  function onTabKeyDown(event: React.KeyboardEvent) {
-    const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
-    if (step === 0) return
-
-    event.preventDefault()
-    const at = TABS.findIndex((t) => t.id === tab)
-    const next = TABS[(at + step + TABS.length) % TABS.length].id
-    setTab(next)
-    tabRefs.current[next]?.focus()
-  }
-
   const visible = useMemo(() => (items ?? []).filter((i) => matches(i, query)), [items, query])
   const searching = query.trim() !== ''
 
@@ -181,56 +164,14 @@ export default function HouseholdScreen({
 
   return (
     <div className="flex flex-col gap-6">
-      <header className="flex items-start gap-3">
+      {/* Which house you are in, on every panel. The name wraps rather than truncating:
+          a house name is short, and reading all of it matters more than a tidy line.
+          Everything else about the household — who owns it, what it is called, who is in
+          it — now lives one tap away under ตั้งค่า instead of above the daily controls. */}
+      <header className="flex items-center gap-3">
         <Avatar src={user.pictureUrl} className="size-10 text-lg" />
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          {/* Wraps rather than truncating: a house name is short, and reading all of it
-              matters more than a tidy single line. */}
-          <h2 className="text-2xl font-semibold break-words text-brand-800">{household.name}</h2>
-          {household.isOwner && (
-            <div className="flex flex-wrap items-center gap-x-5">
-              <span className="text-slate-600">เจ้าของบ้าน</span>
-              <button type="button" onClick={() => setRenaming(true)} className={linkActionClass}>
-                เปลี่ยนชื่อ
-              </button>
-            </div>
-          )}
-        </div>
+        <h2 className="min-w-0 flex-1 text-2xl font-semibold break-words text-brand-800">{household.name}</h2>
       </header>
-
-      <div
-        role="tablist"
-        aria-label="มุมมองของบ้าน"
-        onKeyDown={onTabKeyDown}
-        className="flex gap-2 rounded-xl bg-brand-100 p-2"
-      >
-        {TABS.map((t) => {
-          const selected = t.id === tab
-          return (
-            <button
-              key={t.id}
-              id={`tab-${t.id}`}
-              ref={(el) => {
-                tabRefs.current[t.id] = el
-              }}
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              aria-controls={`panel-${t.id}`}
-              // Roving tabindex: the tab strip is one stop, arrows move within it.
-              tabIndex={selected ? 0 : -1}
-              onClick={() => setTab(t.id)}
-              // A white face on the tinted strip, so an unselected tab still reads as its
-              // own control rather than as a caption.
-              className={`min-h-14 flex-1 rounded-lg px-3 font-medium whitespace-nowrap ${
-                selected ? 'bg-brand-700 text-white' : 'bg-white text-brand-800'
-              }`}
-            >
-              {t.label}
-            </button>
-          )
-        })}
-      </div>
 
       <div role="tabpanel" id="panel-items" aria-labelledby="tab-items" hidden={tab !== 'items'}>
         <div className="flex flex-col gap-4">
@@ -360,28 +301,29 @@ export default function HouseholdScreen({
         </div>
       </div>
 
-      {/* Both panels stay mounted so the tabs' aria-controls always point at something
-          real, but the history only fetches once its tab has been opened. */}
+      {/* All three panels stay mounted so the bar's aria-controls always point at
+          something real, but history and members only fetch once their panel is opened. */}
       <div role="tabpanel" id="panel-history" aria-labelledby="tab-history" hidden={tab !== 'history'}>
         <HistoryPanel household={household} active={tab === 'history'} />
       </div>
 
-      {membersOpen && (
-        <Dialog title="สมาชิกในบ้าน" onClose={onCloseMembers}>
-          <div className="flex flex-col gap-8">
-            <MembersPanel household={household} meId={user.id} active={membersOpen} />
-            {/* Owner-only, and last. Rendered here rather than inside MembersPanel
-                because the confirmation needs the real item count, and that list is not
-                the member panel's business. */}
-            {household.isOwner && (
-              <DeleteHousehold household={household} itemCount={items?.length ?? 0} onDeleted={onDeleted} />
-            )}
-            <button type="button" onClick={onCloseMembers} className={`${primaryButtonClass} w-full`}>
-              ปิด
-            </button>
-          </div>
-        </Dialog>
-      )}
+      <div role="tabpanel" id="panel-settings" aria-labelledby="tab-settings" hidden={tab !== 'settings'}>
+        <SettingsPanel
+          household={household}
+          households={households}
+          user={user}
+          active={tab === 'settings'}
+          itemCount={items?.length ?? 0}
+          onRenamed={onRenamed}
+          onDeleted={onDeleted}
+          onSwitch={onSwitch}
+          onCreateNew={onCreateNew}
+        />
+      </div>
+
+      {/* Only over the stock list. It is the one panel long enough to get lost in, and a
+          button that floated over a half-screen of settings would just be in the way. */}
+      {tab === 'items' && <ScrollToTop />}
 
       {shopping && <ShoppingList items={lowItems} onClose={() => setShopping(false)} />}
 
@@ -394,17 +336,6 @@ export default function HouseholdScreen({
             setAdding(false)
             setItems((current) => sortItems([...(current ?? []), item]))
             if (!units.includes(item.unit)) setUnits((u) => [...u, item.unit].sort())
-          }}
-        />
-      )}
-
-      {renaming && (
-        <RenameHousehold
-          household={household}
-          onCancel={() => setRenaming(false)}
-          onRenamed={(renamed) => {
-            setRenaming(false)
-            onRenamed(renamed)
           }}
         />
       )}

@@ -48,6 +48,23 @@ html {
   font-size: 125%;
 }
 
+/*
+  The height of the fixed bottom bar, named once so nothing has to guess it.
+
+  Two things need this number and both are wrong if they disagree with it: the page holds
+  open this much room at its foot so the last row of a list can clear the bar, and the
+  scroll-to-top button sits just above it. 3.5rem is the bar button's own min-height (70px
+  at this root size), the 2px is its top border, and the inset is the phone's home
+  indicator — zero on a phone that has none, and on anything that is not a phone.
+
+  70px is as low as this goes without breaking something. The label cannot shrink — 20px
+  is the type floor in ADR-0004 — so the only room left is the icon and the padding around
+  it, and 48px of the bar is the tap target the whole app is built to.
+*/
+:root {
+  --nav-height: calc(3.5rem + 2px + env(safe-area-inset-bottom, 0px));
+}
+
 body {
   margin: 0;
   font-family: var(--font-sans);
