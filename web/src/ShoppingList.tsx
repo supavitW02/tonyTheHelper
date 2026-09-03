@@ -13,6 +13,13 @@ import type { Item } from './api'
  * much is left at home. No badge, no buttons, no history — everything this list could
  * also have said is one tap away on the item itself, and none of it helps decide whether
  * to put a bottle in the basket.
+ *
+ * No icon either, and that is the same rule rather than an exception to it. An icon is a
+ * stand-in for a photo (CONTEXT.md), and it earns its place in the stock list by making
+ * one row findable among thirty at a glance. Here the list is four things long and is
+ * read rather than scanned, so the symbol identifies nothing the name beside it has not
+ * already said. Worse, most items have no icon: the fallback drew the same generic bottle
+ * against half the rows, which is a column that looks like information and is not.
  */
 export default function ShoppingList({ items, onClose }: { items: Item[]; onClose: () => void }) {
   return (
@@ -34,12 +41,7 @@ export default function ShoppingList({ items, onClose }: { items: Item[]; onClos
                 // the amount is what the eye comes back to once the name has been read.
                 className="flex items-baseline justify-between gap-4 rounded-xl bg-brand-50 px-4 py-3"
               >
-                <span className="flex min-w-0 items-baseline gap-2">
-                  <span aria-hidden="true" className="shrink-0">
-                    {item.icon || '🧴'}
-                  </span>
-                  <span className="text-xl font-medium break-words">{item.name}</span>
-                </span>
+                <span className="min-w-0 text-xl font-medium break-words">{item.name}</span>
                 {/* "เหลือ" is doing real work: without it a bare number beside a name
                     reads as how many to buy, which is the opposite of what it is. */}
                 <span className="shrink-0 whitespace-nowrap text-slate-600">
