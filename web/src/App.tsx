@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 
 import { acceptInvite, ApiError, getHouseholds, selectHousehold, type Household, type User } from './api'
+import BottomNav, { type Tab } from './BottomNav'
 import CreateHousehold, { CreateHouseholdDialog } from './CreateHousehold'
 import HouseholdScreen from './HouseholdScreen'
 import { resolveUser } from './signIn'
-import { inputClass, Notice, primaryButtonClass, secondaryButtonClass } from './ui'
+import { Notice, primaryButtonClass } from './ui'
 
 type State =
   | { status: 'loading' }
@@ -35,12 +36,18 @@ function inviteProblem(err: unknown): string {
 export default function App() {
   const [state, setState] = useState<State>({ status: 'loading' })
   const [notice, setNotice] = useState<string | null>(null)
-  // Creating an additional household is rare, so it stays behind a deliberate tap
-  // rather than occupying space next to the daily actions.
+  /*
+    Which of the three panels the bottom bar is pointing at.
+
+    It lives up here rather than inside the household screen so that it survives a switch
+    between households: you change house from the settings panel, and staying on that
+    panel is what shows you the switch actually happened. Down there it would reset with
+    the screen and drop you back in a stock list you did not ask for.
+  */
+  const [tab, setTab] = useState<Tab>('items')
+  // Creating an additional household is rare, so it stays behind a deliberate tap from
+  // the settings panel rather than occupying space next to the daily actions.
   const [creatingAnother, setCreatingAnother] = useState(false)
-  // Managing members is a rare errand, so it lives up here beside the other rare errand
-  // rather than taking a third of the tab strip on every screen.
-  const [membersOpen, setMembersOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -92,7 +99,7 @@ export default function App() {
     }
   }
 
-  /** A rename has to reach the switcher too, not just the header it was typed in. */
+  /** A rename has to reach the household list too, not just the header it was typed in. */
   function applyRename(renamed: Household) {
     setState((current) =>
       current.status === 'ready'
@@ -102,13 +109,17 @@ export default function App() {
   }
 
   /**
-   * A deleted household has to disappear from the switcher and from under the user.
+   * A deleted household has to disappear from the list and from under the user.
    *
    * Where they land next is the interesting part: their other households if they have
    * any, and otherwise the create screen — the same place a brand new user starts, since
    * belonging to nothing is exactly the state they are now in.
+   *
+   * Either way the bar goes back to the stock list. Whatever they were doing in settings
+   * was about a household that no longer exists.
    */
   function applyDeletion(householdId: string) {
+    setTab('items')
     setState((current) => {
       if (current.status !== 'ready') return current
       const left = current.households.filter((h) => h.id !== householdId)
@@ -118,93 +129,74 @@ export default function App() {
   }
 
   const current = state.status === 'ready' ? state.households.find((h) => h.id === state.currentId) : undefined
+  const ready = state.status === 'ready'
 
   return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col gap-6 px-6 py-10">
-      <h1 className="flex items-center gap-3 text-3xl font-semibold text-brand-800">
-        <img src="/icon-192.png" alt="" width={192} height={192} className="size-10 shrink-0" />
-        ของใช้ในบ้าน
-      </h1>
+    <>
+      {/* The foot of the page is held open by exactly the height of the fixed bar, so the
+          last item in a list can be scrolled clear of it instead of ending underneath. */}
+      <main
+        className={`mx-auto flex min-h-dvh max-w-md flex-col gap-6 px-6 pt-10 ${
+          ready ? 'pb-[calc(var(--nav-height)_+_1.5rem)]' : 'pb-10'
+        }`}
+      >
+        <h1 className="flex items-center gap-3 text-3xl font-semibold text-brand-800">
+          <img src="/icon-192.png" alt="" width={192} height={192} className="size-10 shrink-0" />
+          ของใช้ในบ้าน
+        </h1>
 
-      {notice && <Notice>{notice}</Notice>}
+        {notice && <Notice>{notice}</Notice>}
 
-      {state.status === 'loading' && <Notice tone="info">กำลังเข้าสู่ระบบ…</Notice>}
+        {state.status === 'loading' && <Notice tone="info">กำลังเข้าสู่ระบบ…</Notice>}
 
-      {state.status === 'needsHousehold' && (
-        <CreateHousehold
-          onCreated={(household) =>
-            setState({ status: 'ready', user: state.user, households: [household], currentId: household.id })
-          }
-        />
-      )}
+        {state.status === 'needsHousehold' && (
+          <CreateHousehold
+            onCreated={(household) =>
+              setState({ status: 'ready', user: state.user, households: [household], currentId: household.id })
+            }
+          />
+        )}
 
-      {state.status === 'ready' && (
-        <div className="flex flex-col gap-3">
-          {/* The switcher only exists for someone who belongs to more than one household:
-              with a single one there is nothing to switch to, and an empty picker would
-              only be a question the user has to work out the answer to. */}
-          {state.households.length > 1 && (
-            <div className="flex flex-col gap-2">
-              <label htmlFor="household-switch" className="font-medium">
-                บ้าน
-              </label>
-              <select
-                id="household-switch"
-                value={state.currentId}
-                onChange={(e) => void switchTo(e.target.value)}
-                className={inputClass}
-              >
-                {state.households.map((h) => (
-                  <option key={h.id} value={h.id}>
-                    {h.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+        {state.status === 'ready' && current && (
+          // Keyed by household so switching resets the item list rather than showing the
+          // previous household's stock while the new one loads.
+          <HouseholdScreen
+            key={current.id}
+            household={current}
+            households={state.households}
+            user={state.user}
+            tab={tab}
+            onRenamed={applyRename}
+            onDeleted={applyDeletion}
+            onSwitch={(householdId) => void switchTo(householdId)}
+            onCreateNew={() => setCreatingAnother(true)}
+          />
+        )}
 
-          {/* The two rare errands, side by side and out of the way of the daily screen.
-              Their own row rather than beside the switcher: at 375px a select plus two
-              labelled buttons does not fit across, and stacking them next to the select
-              left it bottom-aligned against a block twice its height. */}
-          <div className="flex gap-3">
-            <button
-              type="button"
-              onClick={() => setMembersOpen(true)}
-              className={`${secondaryButtonClass} flex-1 whitespace-nowrap`}
-            >
-              สมาชิก
+        {state.status === 'failed' && (
+          <section className="flex flex-col gap-4">
+            <Notice>{state.message}</Notice>
+            <button type="button" onClick={() => window.location.reload()} className={primaryButtonClass}>
+              ลองใหม่
             </button>
-            <button
-              type="button"
-              onClick={() => setCreatingAnother(true)}
-              className={`${secondaryButtonClass} flex-1 whitespace-nowrap`}
-            >
-              + บ้านใหม่
-            </button>
-          </div>
-        </div>
-      )}
+          </section>
+        )}
+      </main>
 
-      {state.status === 'ready' && current && (
-        // Keyed by household so switching resets the item list rather than showing the
-        // previous household's stock while the new one loads.
-        <HouseholdScreen
-          key={current.id}
-          household={current}
-          user={state.user}
-          onRenamed={applyRename}
-          onDeleted={applyDeletion}
-          membersOpen={membersOpen}
-          onCloseMembers={() => setMembersOpen(false)}
-        />
-      )}
+      {/* Outside <main> because it is not part of the document being read, and only once
+          there is a household to navigate: the create screen is the whole app until then,
+          and a bar offering ประวัติ and ตั้งค่า for a house that does not exist yet would
+          be three dead ends. */}
+      {ready && <BottomNav tab={tab} onChange={setTab} />}
 
       {state.status === 'ready' && creatingAnother && (
         <CreateHouseholdDialog
           onCancel={() => setCreatingAnother(false)}
           onCreated={(household) => {
             setCreatingAnother(false)
+            // A new household is empty, so the useful place to land is its stock list with
+            // "เพิ่มของชิ้นแรก" on it — not the settings panel it was created from.
+            setTab('items')
             setState({
               ...state,
               households: [...state.households, household],
@@ -213,15 +205,6 @@ export default function App() {
           }}
         />
       )}
-
-      {state.status === 'failed' && (
-        <section className="flex flex-col gap-4">
-          <Notice>{state.message}</Notice>
-          <button type="button" onClick={() => window.location.reload()} className={primaryButtonClass}>
-            ลองใหม่
-          </button>
-        </section>
-      )}
-    </main>
+    </>
   )
 }
